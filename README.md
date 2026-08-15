@@ -591,6 +591,40 @@ a muovere il bersaglio. Il modello nel world dichiara anche un plugin
 Da usare sulla VM/macchina Ubuntu dove ArduPilot e Gazebo sono installati
 localmente. Sostituire i percorsi con i propri. L'ordine è obbligatorio.
 
+### Preparazione, una volta sola
+
+**Symlink degli asset Gazebo.** Il repository versiona mondo e modello sotto
+`sim/`, ma `gz sim` li carica da `ardupilot_gazebo/`: senza questo passaggio
+`git pull` aggiorna file che la simulazione non legge. Vedi *Problemi noti*.
+
+```bash
+cd "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds"
+mv iris_runway.sdf iris_runway.sdf.bak
+ln -s "$HOME/Desktop/Progetto Drone/drone_tracking_ws/sim/worlds/iris_runway.sdf" .
+```
+
+```bash
+cd "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/models/iris_with_ardupilot"
+mv model.sdf model.sdf.bak
+ln -s "$HOME/Desktop/Progetto Drone/drone_tracking_ws/sim/models/iris_with_ardupilot/model.sdf" .
+```
+
+**Parametri aggiuntivi del SITL**, gli stessi che il container carica da
+`docker/sitl-defaults.parm`:
+
+```bash
+printf 'ARMING_CHECK 0\nINS_USE2 0\nINS_USE3 0\n' > "$HOME/sitl-extra.parm"
+```
+
+### Prima di ogni prova
+
+```bash
+cd "$HOME/Desktop/Progetto Drone/drone_tracking_ws"
+git pull
+colcon build --packages-select drone_tracking
+source install/setup.bash
+```
+
 **T1 — Gazebo**
 
 ```bash
@@ -598,18 +632,13 @@ export LIBGL_ALWAYS_SOFTWARE=1
 gz sim -v4 -r "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds/iris_runway.sdf"
 ```
 
-> I file caricati qui sono la copia sotto `ardupilot_gazebo/`, distinta da quella
-> versionata in `sim/`. Le due vanno tenute allineate a mano: dopo un `git pull`
-> che tocchi il mondo o il modello del drone, conviene verificare che la copia
-> usata da Gazebo sia aggiornata (vedi *Problemi noti*).
-
 **T2 — ArduPilot SITL**
 
 ```bash
 cd "$HOME/Desktop/Progetto Drone/ardupilot"
 ./build/sitl/bin/arducopter --model JSON --speedup 1 \
   --sim-address=127.0.0.1 --sim-port-in=9013 --sim-port-out=9012 \
-  -I0 --defaults Tools/autotest/default_params/gazebo-iris.parm
+  -I0 --defaults Tools/autotest/default_params/gazebo-iris.parm,$HOME/sitl-extra.parm
 ```
 
 **T3 — MAVProxy**
