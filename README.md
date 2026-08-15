@@ -465,7 +465,8 @@ e sopra 1 m di quota.
 
 ### target_mover_node
 
-Muove la sfera rossa in Gazebo via `gz service set_pose`, con due comportamenti:
+Muove la sfera rossa in Gazebo comandandone la posa tramite il servizio
+`set_pose`, con due comportamenti:
 
 | Fase | Comportamento |
 |---|---|
@@ -692,13 +693,39 @@ concreti:
 | Soglia di avvio ricerca | 20 frame → fra 1.5 e 4 s secondo il carico | `soglia_avvia_ricerca_s = 2.0` |
 
 **Il bersaglio girava a un terzo della velocità prevista** — `target_mover_node`
-comandava la posa con `subprocess.run`, che **attende** la fine del processo. Una
-chiamata `gz service set_pose` impiega ~360 ms (misurato), quindi il timer
-dichiarato a 10 Hz girava in realtà a ~2.8 Hz. I parametri di moto erano di fatto
-tarati contro quel timer strozzato. Ora la chiamata parte in background con
-`Popen` e l'esito si verifica al ciclo successivo — gli errori restano visibili,
-il timer resta libero — e le velocità sono espresse in unità al secondo,
-calibrate per riprodurre il comportamento osservato in precedenza.
+comandava la posa lanciando il comando esterno `gz service` e **attendendone** la
+fine. Una chiamata costa ~360 ms (misurato), quindi il timer dichiarato a 10 Hz
+girava in realtà a ~2.8 Hz, e i parametri di moto erano di fatto tarati contro
+quel timer strozzato.
+
+Ora il nodo usa i **binding Python di gz-transport** (`python3-gz-transport13`),
+che riusano un nodo di trasporto persistente: **0.4 ms per richiesta**, contro i
+360 ms del CLI. Le velocità sono inoltre espresse in unità al secondo e integrate
+sul `dt` reale, quindi il moto non dipende più dalla frequenza del timer. Se i
+binding non sono installati il nodo ricade sul comando esterno, avvisando che
+l'aggiornamento della posa scenderà a ~3 Hz.
+
+**Il bersaglio scivolava via dalla traiettoria** — il modello nel mondo era
+dinamico, quindi fra un comando di posa e il successivo la fisica se ne
+impossessava: una sfera senza attrito di rotolamento accumulava velocità e
+rotolava lentamente fuori dal percorso previsto, tanto da non farsi mai trovare
+dal drone al primo passaggio. Ora è dichiarato `<static>true</static>`: il moto è
+interamente comandato da `target_mover_node` e la fisica non lo tocca. La quota è
+stata portata da 0.5 a 0.3 m, pari al raggio della sfera, così poggia a terra
+invece di restare sospesa.
+
+**MAVROS riempiva i log di errori sul sensore di distanza** — ArduPilot invia
+messaggi `DISTANCE_SENSOR` dal rangefinder simulato, e il plugin `distance_sensor`
+di MAVROS li rifiuta più volte al secondo perché non ha una mappatura configurata:
+
+```
+[ERROR] [mavros.distance_sensor]: DS: no mapping for sensor id: 0, type: 4, orientation: 25
+```
+
+Il progetto non usa il rangefinder, quindi il plugin viene escluso all'avvio con
+`-p plugin_denylist:=[distance_sensor]`. Resta una sola riga informativa,
+`Plugin distance_sensor ignored`. Si è preferito questo a disabilitare il
+rangefinder lato ArduPilot, che avrebbe alterato il comportamento di volo.
 
 **Il tracker perdeva un messaggio a ogni riacquisizione** — sul frame di
 acquisizione il nodo usciva senza pubblicare. Sotto jamming, dove le

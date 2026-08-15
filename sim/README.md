@@ -44,10 +44,14 @@ Oppure copiando i due percorsi a mano:
 
 ## Verifica
 
-Il nome del mondo conta: `target_mover_node` invoca
-`gz service -s /world/iris_runway/set_pose`, quindi l'attributo
-`<world name="...">` dell'SDF deve restare `iris_runway`, e la sfera
-deve chiamarsi `bersaglio`.
+Il nome del mondo conta: `target_mover_node` chiama il servizio
+`/world/iris_runway/set_pose`, quindi l'attributo `<world name="...">` dell'SDF
+deve restare `iris_runway`, e la sfera deve chiamarsi `bersaglio`. Se non
+corrispondono il nodo lo segnala a log (`set_pose rifiutato dal simulatore`).
+
+La sfera deve inoltre restare `<static>true</static>`: il suo moto è comandato
+interamente dal nodo, e lasciandola dinamica la fisica la fa rotolare via fra un
+comando e l'altro.
 
 Il topic della telecamera dev'essere `/drone/camera/image_raw`: è quello
 che `tracking.launch.py` passa a `ros_gz_bridge`.

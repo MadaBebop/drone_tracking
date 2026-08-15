@@ -10,6 +10,18 @@ import subprocess
 import math
 from drone_tracking.mission_node import FaseMissione  # type: ignore
 
+# I binding Python di gz-transport riusano un nodo persistente: una richiesta
+# costa ~0.4 ms, contro i ~360 ms del comando `gz service`, che a 10 Hz non
+# starebbe mai dentro il periodo del timer. Se non sono installati si ricade sul
+# CLI, con l'avvertenza stampata all'avvio.
+try:
+    from gz.transport13 import Node as GzNode
+    from gz.msgs10.pose_pb2 import Pose as GzPose
+    from gz.msgs10.boolean_pb2 import Boolean as GzBoolean
+    GZ_BINDINGS = True
+except ImportError:
+    GZ_BINDINGS = False
+
 class FaseBersaglio(Enum):
     PATTUGLIO = "PATTUGLIO"
     EVASIONE  = "EVASIONE"
@@ -68,6 +80,20 @@ class TargetMoverNode(Node):
 
         self.ultimo_istante = None
         self.proc_pendente  = None
+
+        self.nome_modello  = 'bersaglio'
+        self.quota_modello = 0.3   # raggio della sfera: la appoggia a terra
+        self.servizio_posa = '/world/iris_runway/set_pose'
+
+        if GZ_BINDINGS:
+            self.gz_node = GzNode()
+        else:
+            self.gz_node = None
+            self.get_logger().warn(
+                'python3-gz-transport13 non disponibile: si usa il comando '
+                '`gz service`, che costa ~360 ms a chiamata e limita '
+                'l\'aggiornamento della posa a ~3 Hz. Il moto resta corretto '
+                'perché integrato sul dt reale, ma meno fluido.')
 
         self.timer = self.create_timer(0.1, self.muovi_bersaglio)
         self.get_logger().info('TargetMoverNode avviato — comportamento adattivo')
@@ -131,37 +157,49 @@ class TargetMoverNode(Node):
                 self.t = 0.0
                 self.get_logger().info('Evasione completata — riprende pattugliamento')
 
-        z = 0.5
-        req = (f'name: "bersaglio" '
-               f'position: {{x: {self.pos_x:.3f}, y: {self.pos_y:.3f}, z: {z:.3f}}} '
-               f'orientation: {{w: 1.0}}')
-        cmd = ['gz', 'service', '-s', '/world/iris_runway/set_pose',
-               '--reqtype', 'gz.msgs.Pose',
-               '--reptype', 'gz.msgs.Boolean',
-               '--timeout', '500', '--req', req]
-
-        # La chiamata NON va attesa: `gz service` impiega ~360 ms e con
-        # subprocess.run bloccava il timer a ~2.8 Hz invece dei 10 richiesti.
-        # Si lancia in background e si controlla l'esito al ciclo successivo:
-        # gli errori restano visibili, il timer resta libero.
-        if self.proc_pendente is not None:
-            rc = self.proc_pendente.poll()
-            if rc is None:
-                # Ancora in corso dopo un ciclo intero: si abbandona, tanto il
-                # comando di posa che segue lo rende comunque superato.
-                self.proc_pendente.kill()
-                self.proc_pendente.wait()
-            elif rc != 0:
-                errore = self.proc_pendente.stderr.read().decode(errors='replace').strip()
-                self.get_logger().warn(
-                    f'gz service set_pose fallito (rc={rc}): {errore}',
-                    throttle_duration_sec=5.0)
-
-        self.proc_pendente = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self._invia_posa(self.pos_x, self.pos_y, self.quota_modello)
 
         # self.get_logger().info(
         #     f'[{self.fase}] Bersaglio -> ({self.pos_x:.1f}, {self.pos_y:.1f})')
+
+    def _invia_posa(self, x, y, z):
+        """Comanda la posa del bersaglio nel simulatore."""
+        if self.gz_node is not None:
+            req = GzPose()
+            req.name = self.nome_modello
+            req.position.x = float(x)
+            req.position.y = float(y)
+            req.position.z = float(z)
+            req.orientation.w = 1.0
+            esito, risposta = self.gz_node.request(
+                self.servizio_posa, req, GzPose, GzBoolean, 200)
+            if not esito or not risposta.data:
+                self.get_logger().warn(
+                    f'set_pose rifiutato dal simulatore (esito={esito}). '
+                    f'Il modello "{self.nome_modello}" esiste nel mondo?',
+                    throttle_duration_sec=5.0)
+            return
+
+        # Fallback CLI. Il processo non viene atteso né ucciso: durando ~360 ms
+        # verrebbe interrotto a ogni ciclo del timer prima di completare, e la
+        # posa non arriverebbe mai al simulatore.
+        if self.proc_pendente is not None:
+            if self.proc_pendente.poll() is None:
+                return
+            if self.proc_pendente.returncode != 0:
+                errore = self.proc_pendente.stderr.read().decode(errors='replace').strip()
+                self.get_logger().warn(
+                    f'gz service set_pose fallito: {errore}',
+                    throttle_duration_sec=5.0)
+
+        req = (f'name: "{self.nome_modello}" '
+               f'position: {{x: {x:.3f}, y: {y:.3f}, z: {z:.3f}}} '
+               f'orientation: {{w: 1.0}}')
+        self.proc_pendente = subprocess.Popen(
+            ['gz', 'service', '-s', self.servizio_posa,
+             '--reqtype', 'gz.msgs.Pose', '--reptype', 'gz.msgs.Boolean',
+             '--timeout', '500', '--req', req],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 def main(args=None):
     rclpy.init(args=args)

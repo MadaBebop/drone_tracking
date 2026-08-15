@@ -59,7 +59,8 @@ tmux new-window -t "$SESSION" -n mavros \
     "sleep 22; $SOURCES && \
      ros2 run mavros mavros_node --ros-args \
         -p fcu_url:=udp://:14555@127.0.0.1:14556 \
-        -p target_system_id:=1 -p target_component_id:=1; exec bash"
+        -p target_system_id:=1 -p target_component_id:=1 \
+        -p plugin_denylist:=[distance_sensor]; exec bash"
 
 # --- T5: nodi del progetto + ponte immagini ros_gz ---
 tmux new-window -t "$SESSION" -n nodes \

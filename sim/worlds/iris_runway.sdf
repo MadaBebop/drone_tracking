@@ -121,9 +121,14 @@
     </include>
 
 
-    <!-- Bersaglio mobile rosso -->
+    <!-- Bersaglio mobile rosso.
+         static: il moto è interamente comandato da target_mover_node via
+         set_pose. Lasciandolo dinamico la fisica se ne impossessava fra un
+         comando e l'altro: essendo una sfera senza attrito di rotolamento,
+         accumulava velocità e scivolava via dalla traiettoria prevista. -->
     <model name="bersaglio">
-      <pose>20 20 0.5 0 0 0</pose>
+      <static>true</static>
+      <pose>20 20 0.3 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
