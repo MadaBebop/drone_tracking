@@ -76,12 +76,24 @@ class MissionNode(Node):
         self.timer = self.create_timer(0.5, self.aggiorna_missione)
         self.get_logger().info('MissionNode avviato — in attesa di arming')
         
-        # Variabili per la ricerca bersaglio se non agganciato
+        # Variabili per la ricerca bersaglio se non agganciato.
+        # Velocità in unità al secondo, integrate sul dt reale: l'espansione era
+        # un incremento per chiamata (0.002) su un timer a 2 Hz, cioè 4 mm/s.
+        # La spirale impiegava oltre un'ora ad allargarsi di 20 m e in pratica
+        # restava un cerchio fisso di raggio 3 m, mentre il bersaglio in fuga si
+        # allontanava a 1.2 m/s: non lo raggiungeva mai.
         self.ricerca_centro_x = 0.0
         self.ricerca_centro_y = 0.0
         self.ricerca_raggio   = 3.0
         self.ricerca_t        = 0.0
         self.ricerca_espansione = 0.0
+        self.ricerca_vel_angolare   = 0.35  # rad/s
+        # 0.4 m/s di espansione su un giro da ~18 s fanno ~7 m fra un braccio e
+        # il successivo: meno dei ~15 m inquadrati a 12 m di quota, quindi la
+        # spirale non lascia zone scoperte.
+        self.ricerca_vel_espansione = 0.4   # m/s
+        self.ricerca_raggio_max     = 25.0  # m, poi si rinuncia
+        self.ricerca_ultimo_istante = None
         # Attesa prima di dichiarare perso il bersaglio, in SECONDI. Era un
         # conteggio di frame tarato su 10 Hz, ma /target/tracked_position segue
         # il ritmo della telecamera (5-13 Hz): la stessa soglia valeva fra 1.5 e
@@ -113,9 +125,11 @@ class MissionNode(Node):
                         self.ricerca_centro_y = self.posizione_attuale.y
                     self.ricerca_t = 0.0
                     self.ricerca_espansione = 0.0
+                    self.ricerca_ultimo_istante = None
                     self.fase = FaseMissione.RICERCA
                     self.bersaglio_agganciato = False
                     self.istante_perdita = None
+                    self.frame_bersaglio_visibile = 0
             else:
                 self.istante_perdita = None
             return
@@ -231,11 +245,33 @@ class MissionNode(Node):
             self.avvia_pattugliamento()
 
     def esegui_ricerca(self):
-        # Spirale quadra espandibile intorno all'ultima posizione nota
-        self.ricerca_t += 0.1
-        self.ricerca_espansione += 0.002
+        # Spirale espandibile intorno all'ultima posizione nota
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        if self.ricerca_ultimo_istante is None:
+            dt = 0.5
+        else:
+            dt = min(max(adesso - self.ricerca_ultimo_istante, 0.05), 2.0)
+        self.ricerca_ultimo_istante = adesso
+
+        self.ricerca_t += self.ricerca_vel_angolare * dt
+        self.ricerca_espansione += self.ricerca_vel_espansione * dt
 
         raggio_corrente = self.ricerca_raggio + self.ricerca_espansione
+
+        # Oltre il raggio massimo la ricerca è considerata fallita e si torna a
+        # pattugliare: continuare ad allargarsi porterebbe il drone sempre più
+        # lontano dall'area di interesse, senza speranza di ritrovare nulla.
+        if raggio_corrente > self.ricerca_raggio_max:
+            self.get_logger().warn(
+                f'Ricerca fallita entro {self.ricerca_raggio_max:.0f} m — '
+                f'riprendo il pattugliamento')
+            self.fase = FaseMissione.PATTUGLIAMENTO
+            self.waypoint_corrente = 1
+            self.ricerca_espansione = 0.0
+            self.ricerca_t = 0.0
+            self.ricerca_ultimo_istante = None
+            self.frame_bersaglio_visibile = 0
+            return
 
         x = self.ricerca_centro_x + raggio_corrente * math.cos(self.ricerca_t)
         y = self.ricerca_centro_y + raggio_corrente * math.sin(self.ricerca_t)

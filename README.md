@@ -721,6 +721,29 @@ concreti:
 | `dt` del Kalman | fisso a 0.1 con ingresso fra 5 e 15 Hz | ricavato dai tempi reali |
 | Derivata del controller | divisione per 0.1 fisso | divisione per il `dt` misurato |
 | Soglia di avvio ricerca | 20 frame → fra 1.5 e 4 s secondo il carico | `soglia_avvia_ricerca_s = 2.0` |
+| Espansione della spirale | 0.002 per chiamata a 2 Hz = **4 mm/s** | `ricerca_vel_espansione = 0.4` m/s |
+
+**La spirale di ricerca non si allargava** — è il caso più estremo dello stesso
+errore. `ricerca_espansione += 0.002` a ogni chiamata, su un timer a 2 Hz, dà
+**4 millimetri al secondo**: per passare da 3 a 25 m di raggio servivano
+**92 minuti**. In pratica non era una spirale ma un cerchio fisso di raggio 3 m,
+mentre il bersaglio in fuga si allontanava a 1.2 m/s. Il drone entrava in
+`RICERCA` e non ritrovava più nulla.
+
+Ora l'espansione è **0.4 m/s** e la velocità angolare **0.35 rad/s**: un giro
+dura ~18 s e lascia ~7 m fra un braccio e il successivo, meno dei ~15 m
+inquadrati a 12 m di quota, quindi la spirale non salta porzioni di terreno.
+Da 3 a 25 m di raggio in 55 secondi. Superato `ricerca_raggio_max = 25.0` la
+ricerca è dichiarata fallita e la missione torna a `PATTUGLIAMENTO`, invece di
+allargarsi indefinitamente allontanandosi dall'area di interesse.
+
+Effetto misurato su 100 s di missione:
+
+| | Prima | Dopo |
+|---|---|---|
+| Tempo in `AGGANCIO` | 68% | **99.5%** |
+| Distanza mediana | 12.5 m | 9.6 m |
+| Riagganci dopo perdita | mai | 16.5 s e 0.9 s nei due casi osservati |
 
 **Il bersaglio girava a un terzo della velocità prevista** — `target_mover_node`
 comandava la posa lanciando il comando esterno `gz service` e **attendendone** la
