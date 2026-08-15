@@ -5,14 +5,12 @@
 # Impostarlo qui evita di doverlo fare a runtime: via MAVROS il set fallisce
 # finche il pull dei parametri dal firmware non e completo, e il timing non e
 # prevedibile.
-ARMING_CHECK 0
-
-# "Arm: Accels inconsistent" nasce dal confronto fra i tre accelerometri
-# simulati, che divergono quando la fisica singhiozza (il modello gira senza
-# lockstep). Con una sola IMU attiva non c'e nulla da confrontare e il controllo
-# non puo fallire: in simulazione la ridondanza non serve.
-INS_USE2 0
-INS_USE3 0
+# ATTENZIONE al nome: in questa versione di ArduPilot il parametro NON si chiama
+# ARMING_CHECK, che non esiste e viene ignorato in silenzio lasciando tutti i
+# controlli attivi. Si chiama ARMING_SKIPCHK e ha logica inversa: 1 = salta tutto.
+# Senza, l'arming fallisce con "Arm: Gyros inconsistent" o "Accels inconsistent",
+# perche gli IMU simulati divergono quando la fisica singhiozza.
+ARMING_SKIPCHK 1
 
 # --- Reattivita in GUIDED ---
 # I default sono tarati per voli di trasferimento dolci, non per inseguire un

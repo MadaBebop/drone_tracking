@@ -5,9 +5,11 @@
 #
 #   takeoff.sh [quota_metri]     default: 12 (quota di crociera dei waypoint)
 #
-# ARMING_CHECK=0 non si imposta qui: arriva da docker/sitl-defaults.parm, caricato
-# all'avvio del SITL. Via MAVROS il set fallirebbe finché il pull dei parametri dal
-# firmware non è completo, con un timing non prevedibile.
+# I controlli di arming non si disattivano qui: ARMING_SKIPCHK=1 arriva da
+# docker/sitl-defaults.parm, caricato all'avvio del SITL. Via MAVROS il set
+# fallirebbe finché il pull dei parametri dal firmware non è completo, con un
+# timing non prevedibile. Attenzione al nome: ARMING_CHECK non esiste in questa
+# versione di ArduPilot e verrebbe ignorato in silenzio.
 #
 set -e
 

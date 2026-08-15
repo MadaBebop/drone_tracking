@@ -613,8 +613,14 @@ ln -s "$HOME/Desktop/Progetto Drone/drone_tracking_ws/sim/models/iris_with_ardup
 `docker/sitl-defaults.parm`:
 
 ```bash
-printf 'ARMING_CHECK 0\nINS_USE2 0\nINS_USE3 0\n' > "$HOME/sitl-extra.parm"
+printf 'ARMING_SKIPCHK 1\n' > "$HOME/sitl-extra.parm"
 ```
+
+Il nome conta: `ARMING_CHECK` **non esiste** in questa versione di ArduPilot e
+viene ignorato in silenzio, lasciando tutti i controlli attivi. Il parametro
+giusto è `ARMING_SKIPCHK`, con logica inversa — `1` significa "salta tutto".
+Senza, l'arming fallisce con `Arm: Gyros inconsistent` o `Accels inconsistent`,
+perché gli IMU simulati divergono quando la fisica singhiozza.
 
 ### Prima di ogni prova
 
@@ -690,11 +696,15 @@ rimanda anche i messaggi da ROS 2 verso Gazebo.
 > senza un comando esplicito, quindi non raggiunge mai i waypoint.
 
 ```
-param set ARMING_CHECK 0
 mode guided
 arm throttle
 takeoff 12
 ```
+
+I controlli di arming sono già disabilitati da `ARMING_SKIPCHK 1`, caricato
+all'avvio del SITL da `sitl-extra.parm`. Se l'arming viene rifiutato con
+`Arm: Gyros inconsistent`, quel file non è stato caricato: si può impostare il
+parametro a mano con `param set ARMING_SKIPCHK 1` prima di `arm throttle`.
 
 **T7 — Avvio missione**
 
@@ -1054,9 +1064,16 @@ Il crash di MAVROS resta quindi possibile sotto carico: se capita, basta
 rilanciare MAVROS, gli altri nodi si riconnettono da soli senza toccare Gazebo o
 il SITL.
 
-**Prearm check** — il SITL con backend JSON fallisce spesso i controlli sui
-sensori simulati. `ARMING_CHECK=0` prima dell'arming (già incluso in
-`takeoff.sh`).
+**Controlli di arming** — il SITL con backend JSON fallisce spesso i controlli
+sui sensori simulati, tipicamente con `Arm: Gyros inconsistent` o
+`Accels inconsistent`: gli IMU simulati divergono quando la fisica singhiozza.
+
+Il parametro che li disattiva è **`ARMING_SKIPCHK`**, non `ARMING_CHECK`.
+Quest'ultimo non esiste in questa versione di ArduPilot e viene **ignorato in
+silenzio**: si crede di aver disabilitato i controlli e invece sono tutti
+attivi. `ARMING_SKIPCHK` ha inoltre logica inversa — `1` significa "salta
+tutto", non "controlla tutto". Il valore corretto è caricato all'avvio da
+`docker/sitl-defaults.parm` nel container e da `sitl-extra.parm` sulla VM.
 
 **Plugin `TrajectoryFollower` inerte** — il modello `bersaglio` dichiara un
 `gz-sim-trajectory-follower-system` con cinque waypoint, ma quel percorso non ha

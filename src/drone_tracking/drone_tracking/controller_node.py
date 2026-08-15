@@ -69,6 +69,10 @@ class ControllerNode(Node):
         # In metri il guadagno ha un senso fisico diretto: kp = 1.2 significa
         # 1.2 m/s di comando per ogni metro di scarto, cioe uno scarto a regime
         # di circa velocita_bersaglio / kp = 1 m contro un bersaglio a 1.2 m/s.
+        # Provato a scendere a 0.6 con smorzamento 0.6, nell'ipotesi che l'anello
+        # oscillasse: distanza mediana dal bersaglio da 3.5 a 26.7 m e tempo in
+        # AGGANCIO dal 100% al 28%. Con guadagno basso il drone non tiene il
+        # passo. 1.2 resta il valore migliore misurato.
         self.kp_x = 1.2      # 1/s
         self.kp_y = 1.2
         self.kd_x = 0.35
