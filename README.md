@@ -625,14 +625,13 @@ mavproxy.py --master tcp:127.0.0.1:5760 \
 ```bash
 source /opt/ros/jazzy/setup.bash
 ros2 run mavros mavros_node --ros-args \
-  -p fcu_url:=tcp://127.0.0.1:5762 \
+  -p fcu_url:=udp://:14555@127.0.0.1:14556 \
   -p target_system_id:=1 -p target_component_id:=1 \
   -p plugin_denylist:=[distance_sensor]
 ```
 
-MAVROS si collega **direttamente alla porta TCP `5762`** del SITL (`SERIAL1`), non
-all'uscita UDP di MAVProxy: vedi *Problemi noti* per il motivo. MAVProxy continua
-a usare la `5760` e i comandi manuali funzionano come prima.
+MAVROS si collega all'**uscita UDP di MAVProxy**, non a una porta TCP del SITL:
+vedi *Problemi noti* per il motivo, che è tutt'altro che ovvio.
 
 L'ultimo parametro esclude il plugin `distance_sensor`, che altrimenti riempie i
 log di `DS: no mapping for sensor id: 0, type: 4, orientation: 25` più volte al
@@ -975,21 +974,37 @@ Alla perdita di heartbeat la richiesta `AUTOPILOT_VERSION` va in timeout e MAVRO
 chiude la promise con errore; quando la risposta arriva in ritardo prova a
 chiuderla di nuovo, l'eccezione non è gestita e il processo aborta.
 
-Il fattore scatenante è la perdita di heartbeat, che nasce dal percorso
-`SITL → MAVProxy → UDP → MAVROS`: UDP perde pacchetti e il relay aggiunge
-latenza, cosa che pesa quando la macchina è carica per il rendering. Il SITL
-espone però più porte seriali su TCP:
+Il fattore scatenante è la perdita di heartbeat, favorita dal percorso
+`SITL → MAVProxy → UDP → MAVROS` quando la macchina è carica per il rendering.
 
-| Porta | Seriale | Uso |
+**Non collegare MAVROS direttamente al TCP del SITL per evitarlo.** Sembra la
+soluzione ovvia — il SITL espone `SERIAL1` sulla 5762 e `SERIAL2` sulla 5763, e
+il TCP non perde pacchetti — ma **non funziona**: ArduPilot regola gli stream
+MAVLink per singola porta seriale, e su SERIAL1 quelli di posizione non sono
+attivi. Il risultato misurato è insidioso perché parziale:
+
+| Topic | Via MAVProxy (UDP) | Via TCP su SERIAL1 |
 |---|---|---|
-| 5760 | `SERIAL0` | MAVProxy, comandi manuali |
-| 5762 | `SERIAL1` | **MAVROS** |
-| 5763 | `SERIAL2` | libera |
+| `/mavros/state` | ok | ok, 0.86 Hz |
+| `/mavros/local_position/pose` | ok | **nessun dato** |
+| `/mavros/global_position/rel_alt` | ok | **nessun dato** |
 
-Collegando MAVROS a `tcp://127.0.0.1:5762` il trasporto diventa ordinato e senza
-perdite, e MAVProxy resta indipendente sulla 5760. Il bug resta latente sotto
-carico estremo: se ricapita, basta rilanciare MAVROS, gli altri nodi si
-riconnettono da soli.
+MAVROS risulta connesso e l'heartbeat arriva, quindi tutto sembra a posto, ma
+`mission_node` non riceve mai la posizione: `distanza_waypoint` restituisce
+`inf`, il waypoint non è mai raggiunto e **il drone resta fermo sul punto di
+decollo**. Il sintomo a log è inconfondibile:
+
+```
+[mission_node]: Waypoint 0/4 → (0,0,12)m dist:infm
+```
+
+Per usare davvero il TCP diretto occorrerebbe abilitare gli stream su quella
+seriale (famiglia di parametri `SR1_*`, rinominata nelle versioni recenti), cosa
+non verificata qui. Finché non lo è, si passa da MAVProxy.
+
+Il crash di MAVROS resta quindi possibile sotto carico: se capita, basta
+rilanciare MAVROS, gli altri nodi si riconnettono da soli senza toccare Gazebo o
+il SITL.
 
 **Prearm check** — il SITL con backend JSON fallisce spesso i controlli sui
 sensori simulati. `ARMING_CHECK=0` prima dell'arming (già incluso in

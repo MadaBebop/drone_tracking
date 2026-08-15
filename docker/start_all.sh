@@ -55,16 +55,17 @@ tmux new-window -t "$SESSION" -n mavproxy \
         --out 127.0.0.1:14550 --out udp:127.0.0.1:14555; exec bash"
 
 # --- T4: MAVROS2 ---
-# Collegamento diretto alla porta TCP SERIAL1 del SITL, non all'uscita UDP di
-# MAVProxy. UDP perde pacchetti e il relay aggiunge latenza: le conseguenti
-# perdite di heartbeat innescano un bug di MAVROS, che risolve due volte la
-# stessa promise sulla richiesta AUTOPILOT_VERSION e aborta con
-# "std::future_error: Promise already satisfied". Il TCP e ordinato e senza
-# perdite. MAVProxy resta sulla 5760 per i comandi manuali.
+# Collegamento all'uscita UDP di MAVProxy, NON alla porta TCP SERIAL1 del SITL.
+# Il TCP diretto era stato provato per aggirare un crash di MAVROS, ma su
+# SERIAL1 ArduPilot non emette gli stream di posizione: /mavros/state riceveva
+# l'heartbeat mentre local_position/pose e global_position/rel_alt restavano
+# muti. mission_node non vedeva mai la posizione, la distanza dal waypoint
+# risultava infinita e il drone non si muoveva. MAVProxy invece richiede gli
+# stream su SERIAL0 e li ridistribuisce.
 tmux new-window -t "$SESSION" -n mavros \
     "sleep 22; $SOURCES && \
      ros2 run mavros mavros_node --ros-args \
-        -p fcu_url:=tcp://127.0.0.1:5762 \
+        -p fcu_url:=udp://:14555@127.0.0.1:14556 \
         -p target_system_id:=1 -p target_component_id:=1 \
         -p plugin_denylist:=[distance_sensor]; exec bash"
 
