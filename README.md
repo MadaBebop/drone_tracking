@@ -551,32 +551,15 @@ localmente. Sostituire i percorsi con i propri. L'ordine è obbligatorio.
 
 **T1 — Gazebo**
 
-Il mondo e il modello del drone vanno caricati **dal repository**, non dalla copia
-dentro `ardupilot_gazebo/`. Sono gli stessi file che il container usa, quindi
-container e VM restano allineati e un `git pull` aggiorna davvero la simulazione.
-`REPO` va impostato alla cartella del progetto:
-
-```bash
-REPO="$HOME/drone_tracking"
-```
-
 ```bash
 export LIBGL_ALWAYS_SOFTWARE=1
-export GZ_SIM_SYSTEM_PLUGIN_PATH="$HOME/Desktop/Progetto Drone/ardupilot_gazebo/build"
-export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/Desktop/Progetto Drone/ardupilot_gazebo/models"
-gz sim -v4 -r "$REPO/sim/worlds/iris_runway.sdf"
+gz sim -v4 -r "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds/iris_runway.sdf"
 ```
 
-L'ordine di `GZ_SIM_RESOURCE_PATH` conta: la cartella del repo viene per prima,
-così `iris_with_ardupilot` è quello aggiornato, mentre `runway` e
-`iris_with_standoffs` continuano ad arrivare da `ardupilot_gazebo`, che resta
-l'unica fonte per il plugin `libArduPilotPlugin.so`.
-
-> **Perché non usare i file in `ardupilot_gazebo/worlds`.** Sono una seconda copia
-> che git non traccia: aggiornando il repo si aggiorna `sim/`, ma Gazebo continua
-> a caricare la vecchia versione e le correzioni sembrano non avere effetto. È
-> successo davvero — la sfera restava dinamica e rotolava via, e la telecamera
-> restava a 30 Hz, pur essendo entrambe già corrette nel repository.
+> I file caricati qui sono la copia sotto `ardupilot_gazebo/`, distinta da quella
+> versionata in `sim/`. Le due vanno tenute allineate a mano: dopo un `git pull`
+> che tocchi il mondo o il modello del drone, conviene verificare che la copia
+> usata da Gazebo sia aggiornata (vedi *Problemi noti*).
 
 **T2 — ArduPilot SITL**
 
@@ -842,6 +825,25 @@ una perdita di segnale pubblicava la stima di Kalman ricopiando `z` dal messaggi
 in ingresso, che vale 0, cioè il codice convenzionale di assenza. I nodi a valle
 non ne soffrivano perché decidono su `x`/`y`, ma chiunque seguisse la convenzione
 documentata avrebbe scartato stime valide. Ora `z` porta l'ultima area valida.
+
+**Due copie degli asset Gazebo** — il container costruisce l'immagine a partire da
+`sim/`, mentre l'avvio manuale (T1) carica i file da
+`ardupilot_gazebo/worlds` e `ardupilot_gazebo/models`. Sono percorsi distinti:
+`git pull` aggiorna solo i primi. Per controllare che la copia usata da Gazebo
+sia allineata:
+
+```bash
+grep -c "<static>true</static>" "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds/iris_runway.sdf"
+```
+
+```bash
+grep "update_rate" "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/models/iris_with_ardupilot/model.sdf"
+```
+
+Il primo deve restituire `1` (sfera statica, altrimenti rotola via da sola), il
+secondo `<update_rate>15</update_rate>`. Se i valori non corrispondono, la
+simulazione sta girando su asset vecchi e le correzioni del repository non hanno
+effetto.
 
 **L'immagine sobbalza, ma il drone è fermo** — con il rendering software i frame
 non arrivano a cadenza regolare, e a schermo l'effetto è un video che "salta".
