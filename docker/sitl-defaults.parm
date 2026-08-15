@@ -7,6 +7,13 @@
 # prevedibile.
 ARMING_CHECK 0
 
+# "Arm: Accels inconsistent" nasce dal confronto fra i tre accelerometri
+# simulati, che divergono quando la fisica singhiozza (il modello gira senza
+# lockstep). Con una sola IMU attiva non c'e nulla da confrontare e il controllo
+# non puo fallire: in simulazione la ridondanza non serve.
+INS_USE2 0
+INS_USE3 0
+
 # --- Reattivita in GUIDED ---
 # I default sono tarati per voli di trasferimento dolci, non per inseguire un
 # bersaglio che cambia direzione di continuo. Il freno peggiore e il jerk: a

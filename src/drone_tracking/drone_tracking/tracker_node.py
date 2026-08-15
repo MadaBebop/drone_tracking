@@ -60,7 +60,14 @@ class TrackerNode(Node):
 
         self.bersaglio_acquisito = False
         self.frame_senza_segnale = 0
-        self.soglia_perdita = 5
+        # Quanti frame senza segnale tollerare continuando a pubblicare la
+        # predizione. Alzata da 5 a 15 (~1.4 s a 11 Hz): il controller insegue
+        # la stima del filtro, quindi finche questa resta valida il drone
+        # continua a rincorrere il bersaglio invece di fermarsi. Serve nei casi
+        # difficili, come una fuga nella direzione opposta a quella in cui il
+        # drone si sta muovendo, dove il bersaglio esce dall'inquadratura per
+        # qualche decimo di secondo mentre il velivolo inverte la marcia.
+        self.soglia_perdita = 15
 
         # Ultima area valida del contorno. Serve a marcare come utilizzabili le
         # posizioni predette durante una perdita di segnale: `z` è il flag di

@@ -105,7 +105,13 @@ class MissionNode(Node):
         # il ritmo della telecamera (5-13 Hz): la stessa soglia valeva fra 1.5 e
         # 4 secondi a seconda del carico della macchina.
         self.istante_perdita     = None
-        self.soglia_avvia_ricerca_s = 2.0
+        # Alzata da 2 a 6 secondi. Finche la fase resta AGGANCIO il controller
+        # continua a inseguire — sulla misura se il bersaglio e visibile, sulla
+        # predizione di Kalman se e appena sparito — mentre passando a RICERCA
+        # il controllo passa alla spirale e l'inseguimento si interrompe. Dare
+        # piu tempo prima di rinunciare conviene: rientrare in inquadratura e
+        # molto piu probabile che ritrovare il bersaglio con la spirale.
+        self.soglia_avvia_ricerca_s = 6.0
 
     def on_position(self, msg: PoseStamped):
         self.posizione_attuale = msg.pose.position
