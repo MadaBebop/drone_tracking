@@ -625,15 +625,19 @@ mavproxy.py --master tcp:127.0.0.1:5760 \
 ```bash
 source /opt/ros/jazzy/setup.bash
 ros2 run mavros mavros_node --ros-args \
-  -p fcu_url:=udp://:14555@127.0.0.1:14556 \
+  -p fcu_url:=tcp://127.0.0.1:5762 \
   -p target_system_id:=1 -p target_component_id:=1 \
   -p plugin_denylist:=[distance_sensor]
 ```
 
+MAVROS si collega **direttamente alla porta TCP `5762`** del SITL (`SERIAL1`), non
+all'uscita UDP di MAVProxy: vedi *Problemi noti* per il motivo. MAVProxy continua
+a usare la `5760` e i comandi manuali funzionano come prima.
+
 L'ultimo parametro esclude il plugin `distance_sensor`, che altrimenti riempie i
 log di `DS: no mapping for sensor id: 0, type: 4, orientation: 25` più volte al
-secondo. Vedi *Problemi noti*. Omettendolo il sistema funziona lo stesso, ma i log
-diventano illeggibili.
+secondo. Omettendolo il sistema funziona lo stesso, ma i log diventano
+illeggibili.
 
 **T5 — Nodi ROS 2**
 
@@ -943,6 +947,39 @@ come **tag**. Un binario compilato da `master` si dichiara `4.8.0-dev` pur non
 corrispondendo ad alcuna release: è da lì che veniva il "v4.8.0" indicato in una
 versione precedente di questo documento. Il container usa il tag stabile
 `Copter-4.7.0`, modificabile con l'argomento di build `ARDUPILOT_REF`.
+
+**MAVROS aborta con `Promise already satisfied`** — è un difetto di MAVROS 2, non
+del progetto, ma si può evitare togliendone la causa scatenante. La sequenza nei
+log è sempre questa:
+
+```
+CON: Lost connection, HEARTBEAT timed out.
+VER: autopilot version service timeout
+VER: command plugin service call failed!
+failed to send response to /mavros/cmd/command (timeout)
+terminate called after throwing an instance of 'std::future_error'
+  what():  std::future_error: Promise already satisfied
+```
+
+Alla perdita di heartbeat la richiesta `AUTOPILOT_VERSION` va in timeout e MAVROS
+chiude la promise con errore; quando la risposta arriva in ritardo prova a
+chiuderla di nuovo, l'eccezione non è gestita e il processo aborta.
+
+Il fattore scatenante è la perdita di heartbeat, che nasce dal percorso
+`SITL → MAVProxy → UDP → MAVROS`: UDP perde pacchetti e il relay aggiunge
+latenza, cosa che pesa quando la macchina è carica per il rendering. Il SITL
+espone però più porte seriali su TCP:
+
+| Porta | Seriale | Uso |
+|---|---|---|
+| 5760 | `SERIAL0` | MAVProxy, comandi manuali |
+| 5762 | `SERIAL1` | **MAVROS** |
+| 5763 | `SERIAL2` | libera |
+
+Collegando MAVROS a `tcp://127.0.0.1:5762` il trasporto diventa ordinato e senza
+perdite, e MAVProxy resta indipendente sulla 5760. Il bug resta latente sotto
+carico estremo: se ricapita, basta rilanciare MAVROS, gli altri nodi si
+riconnettono da soli.
 
 **Prearm check** — il SITL con backend JSON fallisce spesso i controlli sui
 sensori simulati. `ARMING_CHECK=0` prima dell'arming (già incluso in
