@@ -432,13 +432,28 @@ bersaglio e la predizione divergeva.
 Controllo **proporzionale-derivativo** che traduce l'errore di posizione nel
 frame della telecamera in comandi di velocità in body frame.
 
-| Parametro | Valore |
-|---|---|
-| `kp_x`, `kp_y` | 4.0 (scalati con la quota) |
-| `kd_x`, `kd_y` | 0.8 |
-| `vel_max` | 8.0 m/s |
-| `deadzone` | 0.05 |
-| Frequenza | 10 Hz |
+| Parametro | Valore | Unità |
+|---|---|---|
+| `kp_x`, `kp_y` | 1.2 | 1/s |
+| `kd_x`, `kd_y` | 0.35 | — |
+| `vel_max` | 8.0 | m/s |
+| `deadzone` | 0.3 | metri |
+| Frequenza | 10 | Hz |
+
+**I guadagni agiscono su metri, non su pixel.** L'errore normalizzato d'immagine
+viene prima convertito in scostamento al suolo:
+
+```python
+error = norm * quota * tan(semi_fov)
+```
+
+Le coordinate normalizzate cambiano significato al variare di quota e ottica —
+lo stesso `0.3` vale 2 m a 12 m con FOV 60° e 3.6 m con FOV 90° — quindi una
+taratura fatta su di esse va rifatta a ogni modifica. In metri il guadagno ha un
+senso fisico diretto: `kp = 1.2` significa 1.2 m/s di comando per ogni metro di
+scarto, cioè uno scarto a regime di `velocità_bersaglio / kp` ≈ 1 m contro un
+bersaglio a 1.2 m/s. La quota entra nella conversione, quindi non serve più
+scalare i guadagni separatamente.
 
 **Mappatura degli assi** — l'errore in pixel normalizzati diventa velocità nel
 frame del drone:
@@ -499,10 +514,13 @@ in pochi secondi — il drone agganciava, inseguiva un paio di secondi e perdeva
 | Tempo in `AGGANCIO` | 98.3% | **100%** |
 | Campioni con bersaglio visibile in 100 s | 219 | 892 |
 
-**Scalatura con la quota** — i guadagni sono moltiplicati per
-`quota / 12.0`: lo stesso errore in pixel corrisponde a una distanza reale
-maggiore quando il drone è alto, quindi il guadagno cresce con la quota e la
-risposta resta coerente lungo tutto l'inseguimento.
+**Campo visivo largo** — l'ottica è a 90° invece di 60°: a 12 m di quota
+l'impronta a terra passa da ~14 a ~24 m. Con il campo stretto il bersaglio
+usciva dall'inquadratura appena il drone si inclinava, e veniva perso dopo mezzo
+secondo. Alzare i guadagni non aiutava, anzi: più il drone è aggressivo più si
+inclina, e il bersaglio esce prima. Misurato — frazione di frame con bersaglio
+inquadrato: **57%** con FOV 60° e guadagni alzati, **84%** con FOV 90° e guadagni
+metrici.
 
 **Guardia FOV** — le posizioni con `|x| > 1.2` o `|y| > 1.2` vengono ignorate:
 sono predizioni di Kalman ormai fuori dal campo visivo, inseguirle porterebbe il

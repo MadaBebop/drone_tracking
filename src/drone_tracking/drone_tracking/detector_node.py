@@ -70,7 +70,9 @@ class DetectorNode(Node):
             area_corrente = cv2.contourArea(c)
             
             # Soglia di validità del contorno (evita il rumore visivo)
-            if area_corrente > 200:
+            # Soglia abbassata da 200 a 100 px^2: con il FOV allargato a 90° la
+            # sfera occupa circa un terzo dei pixel di prima a parita di quota.
+            if area_corrente > 100:
                 M = cv2.moments(c)
                 
                 # Protezione da divisione per zero (può capitare se l'area del momento M['m00'] è nulla)

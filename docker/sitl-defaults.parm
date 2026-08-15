@@ -6,3 +6,17 @@
 # finche il pull dei parametri dal firmware non e completo, e il timing non e
 # prevedibile.
 ARMING_CHECK 0
+
+# --- Reattivita in GUIDED ---
+# I default sono tarati per voli di trasferimento dolci, non per inseguire un
+# bersaglio che cambia direzione di continuo. Il freno peggiore e il jerk: a
+# 1.0 m/s^3 servono 2.5 secondi per arrivare all'accelerazione massima, quindi il
+# drone passa l'inseguimento a "prendere l'abbrivio" e arriva sempre tardi.
+#
+# ATTENZIONE ai nomi: da Copter 4.7 sono stati rinominati in unita SI.
+# Su firmware precedenti si chiamano WPNAV_ACCEL (cm/s^2), WPNAV_SPEED (cm/s)
+# e ANGLE_MAX (centesimi di grado), e queste righe verranno ignorate.
+WP_ACC 5.0
+WP_JERK 8.0
+PSC_JERK_NE 15.0
+ATC_ANGLE_MAX 40.0

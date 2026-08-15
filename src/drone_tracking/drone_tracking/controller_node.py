@@ -60,18 +60,24 @@ class ControllerNode(Node):
         # Misurato senza compensazione: correlazione r = -0.665 fra pitch ed
         # errore verticale, con l'errore che spazzava l'intero campo visivo
         # mentre il bersaglio era pressoché fermo.
-        self.semicampo_v = 0.4084   # rad
-        self.semicampo_o = 0.5236   # rad
 
-        # Guadagni PD
-        self.kp_x = 4.0
-        self.kp_y = 4.0
-        self.kd_x = 0.8
-        self.kd_y = 0.8
+        # Guadagni PD espressi in 1/s: agiscono sullo scostamento del bersaglio
+        # in METRI, non sulle coordinate normalizzate dell'immagine. Quelle
+        # cambiano significato al variare di quota e campo visivo — lo stesso
+        # 0.3 vale 2 m a 12 m di quota con FOV 60° e 3.6 m con FOV 90° — quindi
+        # una taratura fatta su di esse va rifatta a ogni modifica dell'ottica.
+        # In metri il guadagno ha un senso fisico diretto: kp = 1.2 significa
+        # 1.2 m/s di comando per ogni metro di scarto, cioe uno scarto a regime
+        # di circa velocita_bersaglio / kp = 1 m contro un bersaglio a 1.2 m/s.
+        self.kp_x = 1.2      # 1/s
+        self.kp_y = 1.2
+        self.kd_x = 0.35
+        self.kd_y = 0.35
         self.vel_max = 8.0
-        
-        self.deadzone = 0.05
-        self.altitudine_crociera = 12.0
+
+        self.deadzone = 0.3          # metri
+        self.semi_fov_o = 0.7854     # rad, meta del FOV orizzontale (90°)
+        self.semi_fov_v = 0.6435     # rad, meta del FOV verticale su 640x480
 
         self.error_x_prev      = 0.0
         self.error_y_prev      = 0.0
@@ -143,8 +149,15 @@ class ControllerNode(Node):
 
         # Si sottrae la traslazione d'immagine dovuta all'assetto, così l'errore
         # rappresenta la posizione del bersaglio e non l'inclinazione del drone.
-        error_x = msg.x - self.roll / self.semicampo_o
-        error_y = msg.y + self.pitch / self.semicampo_v
+        norm_x = msg.x - self.roll / self.semi_fov_o
+        norm_y = msg.y + self.pitch / self.semi_fov_v
+
+        # Conversione in metri sul terreno: con la telecamera a nadir e quota h,
+        # il semicampo copre h*tan(semi_fov), quindi una coordinata normalizzata
+        # vale quella distanza per unità.
+        quota = max(self.altitudine, 1.0)
+        error_x = norm_x * quota * math.tan(self.semi_fov_o)
+        error_y = norm_y * quota * math.tan(self.semi_fov_v)
 
         dt = self._calcola_dt()
 
@@ -159,20 +172,18 @@ class ControllerNode(Node):
         self.error_x_prev = error_x
         self.error_y_prev = error_y
 
-        scala = max(self.altitudine, 1.0) / self.altitudine_crociera
-        kp_x  = self.kp_x * scala
-        kp_y  = self.kp_y * scala
-
-        # Comando nel frame del drone: la telecamera guarda avanti lungo +X.
+        # Nessuna scalatura con la quota: l'errore è già in metri, e la quota è
+        # entrata nella conversione da coordinate immagine a distanza al suolo.
+        # Comando nel frame del drone.
         v_avanti = 0.0
         v_laterale = 0.0
 
         if abs(error_x) > self.deadzone:
-            v_laterale = -(kp_x * error_x + self.kd_x * deriv_x)
+            v_laterale = -(self.kp_x * error_x + self.kd_x * deriv_x)
             v_laterale = max(-self.vel_max, min(self.vel_max, v_laterale))
 
         if abs(error_y) > self.deadzone:
-            v_avanti = -(kp_y * error_y + self.kd_y * deriv_y)
+            v_avanti = -(self.kp_y * error_y + self.kd_y * deriv_y)
             v_avanti = max(-self.vel_max, min(self.vel_max, v_avanti))
 
         # Rotazione dal frame del drone a quello locale ENU.
