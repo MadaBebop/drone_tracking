@@ -551,10 +551,32 @@ localmente. Sostituire i percorsi con i propri. L'ordine è obbligatorio.
 
 **T1 — Gazebo**
 
+Il mondo e il modello del drone vanno caricati **dal repository**, non dalla copia
+dentro `ardupilot_gazebo/`. Sono gli stessi file che il container usa, quindi
+container e VM restano allineati e un `git pull` aggiorna davvero la simulazione.
+`REPO` va impostato alla cartella del progetto:
+
+```bash
+REPO="$HOME/drone_tracking"
+```
+
 ```bash
 export LIBGL_ALWAYS_SOFTWARE=1
-gz sim -v4 -r "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds/iris_runway.sdf"
+export GZ_SIM_SYSTEM_PLUGIN_PATH="$HOME/Desktop/Progetto Drone/ardupilot_gazebo/build"
+export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/Desktop/Progetto Drone/ardupilot_gazebo/models"
+gz sim -v4 -r "$REPO/sim/worlds/iris_runway.sdf"
 ```
+
+L'ordine di `GZ_SIM_RESOURCE_PATH` conta: la cartella del repo viene per prima,
+così `iris_with_ardupilot` è quello aggiornato, mentre `runway` e
+`iris_with_standoffs` continuano ad arrivare da `ardupilot_gazebo`, che resta
+l'unica fonte per il plugin `libArduPilotPlugin.so`.
+
+> **Perché non usare i file in `ardupilot_gazebo/worlds`.** Sono una seconda copia
+> che git non traccia: aggiornando il repo si aggiorna `sim/`, ma Gazebo continua
+> a caricare la vecchia versione e le correzioni sembrano non avere effetto. È
+> successo davvero — la sfera restava dinamica e rotolava via, e la telecamera
+> restava a 30 Hz, pur essendo entrambe già corrette nel repository.
 
 **T2 — ArduPilot SITL**
 
