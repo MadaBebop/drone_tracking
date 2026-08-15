@@ -649,9 +649,17 @@ ros2 launch drone_tracking tracking.launch.py
 ```
 
 Il launch file avvia i sei nodi **e** il `parameter_bridge` di `ros_gz` che porta
-`/drone/camera/image_raw` da Gazebo a ROS 2.
+`/drone/camera/image_raw` da Gazebo a ROS 2. Non serve quindi lanciare un secondo
+ponte a mano: due `parameter_bridge` sullo stesso topic si sovrappongono, e se il
+secondo è dichiarato bidirezionale (`@gz.msgs.Image` invece di `[gz.msgs.Image`)
+rimanda anche i messaggi da ROS 2 verso Gazebo.
 
 **T6 — Decollo** (nella console MAVProxy)
+
+> **Passaggio obbligatorio.** Saltandolo il drone resta a terra: `mission_node`
+> comincia a pubblicare i setpoint di posizione, ArduPilot ruota per allinearsi
+> allo yaw richiesto — sembra "girare su se stesso" — ma in GUIDED non decolla
+> senza un comando esplicito, quindi non raggiunge mai i waypoint.
 
 ```
 param set ARMING_CHECK 0
@@ -666,8 +674,10 @@ takeoff 12
 ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true"
 ```
 
-La quota di decollo dev'essere **12 m**, coerente con i waypoint e con
-l'`altitudine_crociera` usata dal controller per scalare i guadagni.
+La quota di decollo dev'essere **12 m**, coerente con i waypoint. La quota entra
+anche nella conversione da coordinate immagine a metri fatta dal controller,
+quindi volare a una quota molto diversa cambia la scala dell'errore — non i
+guadagni, che sono in unità fisiche, ma l'ampiezza dell'area inquadrata.
 
 ---
 
