@@ -468,10 +468,34 @@ e sopra 1 m di quota.
 Muove la sfera rossa in Gazebo comandandone la posa tramite il servizio
 `set_pose`, con due comportamenti:
 
-| Fase | Comportamento |
-|---|---|
-| `PATTUGLIO` | Orbita circolare attorno a `(20, 20)`, raggio 3 m |
-| `EVASIONE` | Fuga in linea retta nella direzione opposta al drone, per 15 s |
+| Fase | Comportamento | Velocità |
+|---|---|---|
+| `PATTUGLIO` | Orbita circolare attorno a `(20, 20)`, raggio 3 m | 0.35 rad/s ≈ **1.05 m/s** |
+| `EVASIONE` | Fuga in linea retta opposta al drone, per 20 s | **1.2 m/s** |
+
+**Perché queste velocità.** Il limite non è la velocità massima del drone, che
+arriva a 8 m/s, ma l'**errore a regime** del controllo proporzionale: inseguendo
+un bersaglio a velocità costante, l'errore d'immagine si stabilizza intorno a
+`velocità_bersaglio / kp`. Con `kp = 4.0`:
+
+| Velocità bersaglio | Errore a regime | Esito |
+|---|---|---|
+| 1.2 m/s | ~0.30 | margine ampio, regge anche sotto jamming |
+| 2.0 m/s | ~0.50 | metà semicampo: la prima finestra di jamming lo fa uscire |
+| 4.2 m/s | oltre il campo | mai agganciato — era il valore originale dell'orbita |
+
+Misure su 100 s di missione, distanza orizzontale drone-bersaglio:
+
+| | Fuga a 2.0 m/s | Fuga a 1.2 m/s |
+|---|---|---|
+| Distanza massima | 48.5 m | 26.2 m |
+| Distanza finale | 43.4 m | **6.3 m** |
+| Tempo in `AGGANCIO` | 76% | 68% |
+
+Con la fuga a 2 m/s il drone terminava a 43 m e in allontanamento; a 1.2 m/s
+recupera e si riporta sopra il bersaglio. Per rendere l'inseguimento più difficile
+conviene alzare `kp_x`/`kp_y` in `controller_node` insieme alla velocità, non la
+velocità da sola.
 
 L'evasione scatta dopo che la missione è entrata in `AGGANCIO`: il bersaglio si
 comporta come un veicolo che si accorge di essere inseguito e reagisce con un
@@ -526,8 +550,14 @@ mavproxy.py --master tcp:127.0.0.1:5760 \
 source /opt/ros/jazzy/setup.bash
 ros2 run mavros mavros_node --ros-args \
   -p fcu_url:=udp://:14555@127.0.0.1:14556 \
-  -p target_system_id:=1 -p target_component_id:=1
+  -p target_system_id:=1 -p target_component_id:=1 \
+  -p plugin_denylist:=[distance_sensor]
 ```
+
+L'ultimo parametro esclude il plugin `distance_sensor`, che altrimenti riempie i
+log di `DS: no mapping for sensor id: 0, type: 4, orientation: 25` più volte al
+secondo. Vedi *Problemi noti*. Omettendolo il sistema funziona lo stesso, ma i log
+diventano illeggibili.
 
 **T5 — Nodi ROS 2**
 
@@ -738,6 +768,31 @@ una perdita di segnale pubblicava la stima di Kalman ricopiando `z` dal messaggi
 in ingresso, che vale 0, cioè il codice convenzionale di assenza. I nodi a valle
 non ne soffrivano perché decidono su `x`/`y`, ma chiunque seguisse la convenzione
 documentata avrebbe scartato stime valide. Ora `z` porta l'ultima area valida.
+
+**L'immagine sobbalza, ma il drone è fermo** — con il rendering software i frame
+non arrivano a cadenza regolare, e a schermo l'effetto è un video che "salta".
+Non è un'oscillazione del velivolo: la verità di Gazebo, campionata a 30 Hz dal
+topic delle pose, dà in hover **roll std 0.26°** ed escursione ±0.4°, con pitch
+praticamente nullo. Il drone è stabile.
+
+Attenzione a non farsi ingannare da `/mavros/imu/data`: pubblica a ~1.6 Hz e
+campionarlo suggerisce oscillazioni di 0.4 rad/s che non esistono — è aliasing.
+Per giudicare l'assetto va usato il topic delle pose di Gazebo, non l'IMU via
+MAVLink.
+
+Il rimedio applicato è abbassare `<update_rate>` della telecamera da 30 a **15**:
+chiedere una frequenza irraggiungibile faceva mancare al renderer ogni scadenza,
+consegnando i frame quando capitava. Misure su 20 s:
+
+| | `update_rate` 30 | `update_rate` 15 |
+|---|---|---|
+| Frequenza effettiva | 11.4 Hz | 10.9 Hz |
+| Deviazione standard | 31.2 ms | **14.2 ms** |
+| Intervallo peggiore | 397.6 ms | **179.4 ms** |
+| Jitter relativo | 36.4% | **17.1%** |
+
+Il jitter si dimezza senza perdere frequenza. Il residuo dipende dal
+rasterizzatore software: sparisce con accelerazione grafica.
 
 **Frame rate della telecamera nel container** — il sensore dichiara
 `<update_rate>30</update_rate>`, ma in headless senza GPU Gazebo renderizza via

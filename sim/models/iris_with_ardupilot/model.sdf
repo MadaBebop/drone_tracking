@@ -879,7 +879,12 @@
           </clip>
         </camera>
         <always_on>1</always_on>
-        <update_rate>30</update_rate>
+        <!-- 30 Hz non sono raggiungibili con il rasterizzatore software: il
+             renderer manca la scadenza e consegna i frame a intervalli molto
+             irregolari (misurato: 36% di jitter, punte di 398 ms contro 85 di
+             media), che a schermo appaiono come un'immagine che sobbalza.
+             Chiedendo una frequenza sostenibile la cadenza si regolarizza. -->
+        <update_rate>15</update_rate>
         <visualize>true</visualize>
         <!--
           Il topic è pubblicato direttamente da Gazebo e portato in ROS 2 dal

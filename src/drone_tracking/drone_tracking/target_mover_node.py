@@ -69,14 +69,23 @@ class TargetMoverNode(Node):
         self.centro_x = 20.0
         self.centro_y = 20.0
         self.raggio   = 3.0
-        self.velocita_angolare = 1.4    # rad/s  (era 0.5 rad/tick a ~2.8 Hz)
+        # 0.35 rad/s su raggio 3 m = ~1.05 m/s tangenziali, passo d'uomo.
+        # Era 1.4 rad/s, cioè 4.2 m/s: su un cerchio così stretto la direzione
+        # si invertiva ogni due secondi e il drone non riusciva mai a
+        # stabilizzarsi sopra il bersaglio.
+        self.velocita_angolare = 0.35   # rad/s
 
-        # Parametri evasione
-        self.vel_evasione      = 1.1    # m/s    (era 0.4 m/tick a ~2.8 Hz)
+        # Parametri evasione. Il limite non è la velocità massima del drone
+        # (8 m/s) ma l'errore a regime del controllo proporzionale, che vale
+        # circa `velocita_bersaglio / kp`: con kp = 4.0, a 2 m/s il bersaglio si
+        # stabilizzava a 0.5 in coordinate normalizzate, cioè a metà del
+        # semicampo visivo, e la prima finestra di jamming lo faceva uscire.
+        # A 1.2 m/s l'errore a regime scende a ~0.3 e il margine regge.
+        self.vel_evasione      = 1.2    # m/s
         self.dir_evasione_x    = 0.0
         self.dir_evasione_y    = 0.0
         self.tempo_evasione    = 0.0
-        self.durata_evasione_s = 49.0   # s      (era 150 tick a ~2.8 Hz)
+        self.durata_evasione_s = 20.0   # s  -> ~40 m di fuga
 
         self.ultimo_istante = None
         self.proc_pendente  = None
