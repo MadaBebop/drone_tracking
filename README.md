@@ -891,9 +891,28 @@ documentata avrebbe scartato stime valide. Ora `z` porta l'ultima area valida.
 
 **Due copie degli asset Gazebo** — il container costruisce l'immagine a partire da
 `sim/`, mentre l'avvio manuale (T1) carica i file da
-`ardupilot_gazebo/worlds` e `ardupilot_gazebo/models`. Sono percorsi distinti:
-`git pull` aggiorna solo i primi. Per controllare che la copia usata da Gazebo
-sia allineata:
+`ardupilot_gazebo/worlds` e `ardupilot_gazebo/models`. Sono percorsi distinti con
+gli stessi nomi: `git pull` aggiorna solo i primi, mentre Gazebo legge i secondi.
+Il file corretto finisce sul disco e resta inutilizzato, e le correzioni sembrano
+non avere effetto.
+
+**La soluzione definitiva è un symlink**, da fare una volta sola. Non richiede di
+cambiare il comando di avvio né di ricopiare nulla a ogni aggiornamento:
+
+```bash
+cd "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds"
+mv iris_runway.sdf iris_runway.sdf.bak
+ln -s "$HOME/Desktop/Progetto Drone/drone_tracking_ws/sim/worlds/iris_runway.sdf" .
+```
+
+```bash
+cd "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/models/iris_with_ardupilot"
+mv model.sdf model.sdf.bak
+ln -s "$HOME/Desktop/Progetto Drone/drone_tracking_ws/sim/models/iris_with_ardupilot/model.sdf" .
+```
+
+Da quel momento le due copie sono lo stesso file e `git pull` aggiorna davvero la
+simulazione. Per controllare che la copia usata da Gazebo sia allineata:
 
 ```bash
 grep -c "<static>true</static>" "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds/iris_runway.sdf"
