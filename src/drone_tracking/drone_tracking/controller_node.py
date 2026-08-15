@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+import math
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point, Twist
+from geometry_msgs.msg import Point, PoseStamped, Twist
 from std_msgs.msg import Bool, Float64, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from drone_tracking.mission_node import FaseMissione  # type: ignore
@@ -30,6 +31,12 @@ class ControllerNode(Node):
         self.gps_sub = self.create_subscription(
             Bool, '/gps/jammed', self.on_gps_status, 10)
 
+        # Serve lo yaw per convertire i comandi dal frame del drone a quello del
+        # mondo: vedi la nota in on_tracked.
+        self.pose_sub = self.create_subscription(
+            PoseStamped, '/mavros/local_position/pose',
+            self.on_posa, qos_mavros)
+
         self.cmd_pub = self.create_publisher(
             Twist, '/drone/cmd_vel', 10)
 
@@ -40,6 +47,7 @@ class ControllerNode(Node):
         self.altitudine     = 0.0
         self.in_volo        = False
         self.fase_missione  = FaseMissione.ATTESA.value
+        self.yaw            = 0.0
 
         # Guadagni PD
         self.kp_x = 4.0
@@ -89,6 +97,11 @@ class ControllerNode(Node):
             self.primo_aggancio = True
             self.cmd_corrente = Twist()
 
+    def on_posa(self, msg: PoseStamped):
+        q = msg.pose.orientation
+        self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                              1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
     def on_gps_status(self, msg: Bool):
         if msg.data and not self.gps_jammed:
             self.get_logger().warn('GPS perso — modalità visione attiva')
@@ -131,13 +144,30 @@ class ControllerNode(Node):
         kp_x  = self.kp_x * scala
         kp_y  = self.kp_y * scala
 
+        # Comando nel frame del drone: la telecamera guarda avanti lungo +X.
+        v_avanti = 0.0
+        v_laterale = 0.0
+
         if abs(error_x) > self.deadzone:
-            cmd.linear.y = -(kp_x * error_x + self.kd_x * deriv_x)
-            cmd.linear.y = max(-self.vel_max, min(self.vel_max, cmd.linear.y))
+            v_laterale = -(kp_x * error_x + self.kd_x * deriv_x)
+            v_laterale = max(-self.vel_max, min(self.vel_max, v_laterale))
 
         if abs(error_y) > self.deadzone:
-            cmd.linear.x = -(kp_y * error_y + self.kd_y * deriv_y)
-            cmd.linear.x = max(-self.vel_max, min(self.vel_max, cmd.linear.x))
+            v_avanti = -(kp_y * error_y + self.kd_y * deriv_y)
+            v_avanti = max(-self.vel_max, min(self.vel_max, v_avanti))
+
+        # Rotazione dal frame del drone a quello locale ENU.
+        # `/mavros/setpoint_velocity/cmd_vel_unstamped` viene tradotto da MAVROS
+        # in SET_POSITION_TARGET_LOCAL_NED con frame LOCAL_NED, cioè il frame del
+        # MONDO: pubblicare lì un vettore calcolato nel frame della telecamera è
+        # corretto solo se lo yaw è zero. In volo lo yaw non è controllato e
+        # deriva: misurato 25° di media con ±21° di oscillazione, che portava il
+        # comando a puntare in media 61° fuori bersaglio — il drone spingeva di
+        # traverso e non riusciva a seguire nemmeno un'orbita lenta.
+        cos_y = math.cos(self.yaw)
+        sin_y = math.sin(self.yaw)
+        cmd.linear.x = v_avanti * cos_y - v_laterale * sin_y
+        cmd.linear.y = v_avanti * sin_y + v_laterale * cos_y
 
         self.cmd_corrente = cmd
         self.cmd_pub.publish(cmd)

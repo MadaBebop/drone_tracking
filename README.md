@@ -441,10 +441,39 @@ frame della telecamera in comandi di velocità in body frame.
 | `deadzone` | 0.05 |
 | Frequenza | 10 Hz |
 
-Mappatura degli assi — l'errore in pixel normalizzati diventa velocità:
+**Mappatura degli assi** — l'errore in pixel normalizzati diventa velocità nel
+frame del drone:
 
-- `error_x` → `linear.y` (laterale), segno invertito
-- `error_y` → `linear.x` (longitudinale), segno invertito
+- `error_x` → velocità laterale, segno invertito
+- `error_y` → velocità longitudinale, segno invertito
+
+**Rotazione nel frame del mondo** — il comando così ottenuto **non** va
+pubblicato direttamente. `/mavros/setpoint_velocity/cmd_vel_unstamped` viene
+tradotto da MAVROS in `SET_POSITION_TARGET_LOCAL_NED` con frame `LOCAL_NED`,
+cioè il frame del **mondo**, non quello del velivolo. Il controller ruota quindi
+il vettore con lo yaw letto da `/mavros/local_position/pose`:
+
+```python
+cmd.linear.x = v_avanti * cos(yaw) - v_laterale * sin(yaw)
+cmd.linear.y = v_avanti * sin(yaw) + v_laterale * cos(yaw)
+```
+
+Senza questa rotazione il sistema è corretto solo con yaw esattamente zero. In
+volo lo yaw non è comandato e deriva: misurato fra 25° e 47°, con oscillazioni di
+±20°. Il comando finiva **in media 61° fuori bersaglio** e il drone spingeva di
+traverso, incapace di seguire perfino l'orbita lenta del bersaglio.
+
+| | Prima | Dopo |
+|---|---|---|
+| Scarto medio comando/bersaglio | −61.3° | **−8.6°** |
+| Scarto mediano | −61.3° | −11.4° |
+| Tempo in `AGGANCIO` | — | 98.3% |
+| Distanza minima raggiunta | — | 2.9 m |
+
+Per diagnosticare guasti di questo tipo non basta osservare se il drone si muove:
+va confrontata la **direzione** del comando con la direzione reale del bersaglio.
+Uno scarto sistematico costante indica un frame sbagliato, non una taratura da
+rivedere.
 
 **Scalatura con la quota** — i guadagni sono moltiplicati per
 `quota / 12.0`: lo stesso errore in pixel corrisponde a una distanza reale
