@@ -1,0 +1,48 @@
+services:
+  sim:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        # Ultimo tag stabile di ArduPilot Copter. Per riprodurre esattamente il
+        # binario di sviluppo locale (che si dichiara 4.8.0-dev) usare "master",
+        # al prezzo della riproducibilità.
+        ARDUPILOT_REF: Copter-4.7.0
+        ARDUPILOT_GAZEBO_REF: main
+    image: drone-tracking:jazzy
+    container_name: drone-tracking
+    stdin_open: true
+    tty: true
+    # La simulazione usa memoria condivisa per il rendering: 64 MB non bastano.
+    shm_size: "1gb"
+    environment:
+      # Mondo caricato da start_all.sh (cercato in /opt/ardupilot_gazebo/worlds).
+      WORLD: iris_runway.sdf
+      # 1 = solo server fisico, nessuna finestra. Metti 0 per la GUI (serve X11).
+      HEADLESS: "1"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      RCUTILS_COLORIZED_OUTPUT: "1"
+      # Isola il middleware ROS 2 da altri host sulla stessa rete.
+      # ROS_LOCALHOST_ONLY è deprecato in Jazzy e stampa un warning a ogni
+      # comando ros2: si usa il meccanismo che lo ha sostituito.
+      ROS_DOMAIN_ID: "42"
+      ROS_AUTOMATIC_DISCOVERY_RANGE: "LOCALHOST"
+      # --- GUI: decommenta su Linux/WSLg dopo aver messo HEADLESS a "0" ---
+      # DISPLAY: ${DISPLAY}
+      # QT_X11_NO_MITSHM: "1"
+    ports:
+      # MAVLink TCP di ArduPilot: per collegare Mission Planner o QGC dall'host.
+      - "5760:5760"
+      # Uscita MAVProxy verso una GCS esterna.
+      - "14550:14550/udp"
+    volumes:
+      # Sviluppo a caldo: modifichi i nodi sull'host, il container li vede subito.
+      # L'immagine è buildata con --symlink-install, quindi basta riavviare i nodi
+      # (niente rebuild) per le modifiche ai file Python.
+      - ./src/drone_tracking/drone_tracking:/ws/src/drone_tracking/drone_tracking:ro
+      - ./src/drone_tracking/launch:/ws/src/drone_tracking/launch:ro
+      # Frame salvati da snapshot.sh: ispezionabili dall'host senza GUI.
+      - ./snapshots:/ws/snapshots:rw
+      # --- GUI su Linux: decommenta insieme a DISPLAY qui sopra ---
+      # - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    command: bash

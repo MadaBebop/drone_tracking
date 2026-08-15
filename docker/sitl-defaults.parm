@@ -1,0 +1,8 @@
+# Parametri applicati al SITL in aggiunta a Tools/autotest/default_params/gazebo-iris.parm
+# (ArduPilot accetta piu file in --defaults, separati da virgola).
+#
+# Il backend JSON con Gazebo fallisce spesso i prearm check sui sensori simulati.
+# Impostarlo qui evita di doverlo fare a runtime: via MAVROS il set fallisce
+# finche il pull dei parametri dal firmware non e completo, e il timing non e
+# prevedibile.
+ARMING_CHECK 0
