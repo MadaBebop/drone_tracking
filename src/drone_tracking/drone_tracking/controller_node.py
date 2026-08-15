@@ -56,8 +56,26 @@ class ControllerNode(Node):
         self.primo_aggancio    = True
         self.cmd_corrente      = Twist()
 
+        # on_tracked è guidato dai messaggi del tracker, il cui ritmo segue la
+        # telecamera (misurato fra 5 e 13 Hz): il termine derivativo va diviso
+        # per l'intervallo reale, non per una costante.
+        self.dt_nominale    = 0.1
+        self.dt_min         = 0.02
+        self.dt_max         = 0.5
+        self.ultimo_istante = None
+
         self.vel_timer = self.create_timer(0.1, self.pubblica_velocita_continua)
         self.get_logger().info('ControllerNode avviato')
+
+    def _calcola_dt(self):
+        """Intervallo reale dall'ultima stima ricevuta, con clamp di sicurezza."""
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        if self.ultimo_istante is None:
+            self.ultimo_istante = adesso
+            return self.dt_nominale
+        dt = adesso - self.ultimo_istante
+        self.ultimo_istante = adesso
+        return float(min(max(dt, self.dt_min), self.dt_max))
 
     def pubblica_velocita_continua(self):
         fase_ok = FaseMissione.AGGANCIO.value in self.fase_missione
@@ -85,6 +103,7 @@ class ControllerNode(Node):
         if not target_visible:
             self.cmd_corrente = Twist()
             self.primo_aggancio = True
+            self.ultimo_istante = None
             return
 
         # Guardia FOV — ignora predizioni Kalman fuori range
@@ -95,14 +114,16 @@ class ControllerNode(Node):
         error_x = msg.x
         error_y = msg.y
 
+        dt = self._calcola_dt()
+
         # Evita derivative kick al primo frame
         if self.primo_aggancio:
             self.error_x_prev = error_x
             self.error_y_prev = error_y
             self.primo_aggancio = False
 
-        deriv_x = (error_x - self.error_x_prev) / 0.1
-        deriv_y = (error_y - self.error_y_prev) / 0.1
+        deriv_x = (error_x - self.error_x_prev) / dt
+        deriv_y = (error_y - self.error_y_prev) / dt
         self.error_x_prev = error_x
         self.error_y_prev = error_y
 

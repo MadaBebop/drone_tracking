@@ -30,13 +30,20 @@ class TrackerNode(Node):
         # --- Filtro Kalman [x, y, vx, vy] ---
         self.stato_stimato = np.zeros((4, 1), dtype=np.float32)
 
-        dt = 0.1
+        # Il nodo è guidato dai messaggi, non da un timer: il suo ritmo è quello
+        # della telecamera, che varia col carico della macchina (misurato fra 5 e
+        # 13 Hz). Il dt viene quindi ricavato dai tempi reali fra due misure, non
+        # fissato a una costante.
+        self.dt_nominale = 0.1      # usato solo per la primissima misura
+        self.dt_min      = 0.02     # limiti di sicurezza: un dt anomalo
+        self.dt_max      = 0.5      # manderebbe in divergenza la predizione
+        self.ultimo_istante = None
 
         self.evoluzione_stato = np.array([
-            [1, 0, dt, 0 ],
-            [0, 1, 0,  dt],
-            [0, 0, 1,  0 ],
-            [0, 0, 0,  1 ]
+            [1, 0, self.dt_nominale, 0               ],
+            [0, 1, 0,                self.dt_nominale],
+            [0, 0, 1,                0               ],
+            [0, 0, 0,                1               ]
         ], dtype=np.float32)
 
         self.mappa_osservazione = np.array([
@@ -55,7 +62,23 @@ class TrackerNode(Node):
         self.frame_senza_segnale = 0
         self.soglia_perdita = 5
 
+        # Ultima area valida del contorno. Serve a marcare come utilizzabili le
+        # posizioni predette durante una perdita di segnale: `z` è il flag di
+        # validità letto a valle, e ricopiare lo zero del messaggio in ingresso
+        # le farebbe scartare come "bersaglio assente".
+        self.ultima_area = 0.0
+
         self.get_logger().info('TrackerNode avviato — filtro Kalman attivo')
+
+    def _calcola_dt(self):
+        """Intervallo reale trascorso dall'ultima misura, con clamp di sicurezza."""
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        if self.ultimo_istante is None:
+            self.ultimo_istante = adesso
+            return self.dt_nominale
+        dt = adesso - self.ultimo_istante
+        self.ultimo_istante = adesso
+        return float(min(max(dt, self.dt_min), self.dt_max))
 
     def on_noise_level(self, msg: Float32):
         self.livello_rumore = msg.data
@@ -79,6 +102,10 @@ class TrackerNode(Node):
         self.frame_senza_segnale = 0
         self.stato_stimato = np.zeros((4, 1), dtype=np.float32)
         self.incertezza_corrente = np.eye(4, dtype=np.float32)
+        self.ultima_area = 0.0
+        # Alla ripresa il primo dt ripartirebbe dal tempo trascorso durante la
+        # perdita, che non è un intervallo di campionamento valido.
+        self.ultimo_istante = None
 
     def on_detection(self, msg: Point):
         segnale_presente = not (msg.z == 0.0)
@@ -87,7 +114,13 @@ class TrackerNode(Node):
             self.stato_stimato = np.array(
                 [[msg.x], [msg.y], [0.0], [0.0]], dtype=np.float32)
             self.bersaglio_acquisito = True
+            self.ultima_area = msg.z
+            self._calcola_dt()   # inizializza il riferimento temporale
             self.get_logger().info('Bersaglio acquisito')
+            # La posizione appena acquisita va pubblicata subito: uscire senza
+            # farlo faceva perdere un messaggio a ogni riacquisizione, e sotto
+            # jamming le riacquisizioni sono continue.
+            self.pub.publish(Point(x=float(msg.x), y=float(msg.y), z=float(msg.z)))
             return
 
         if not self.bersaglio_acquisito:
@@ -96,7 +129,11 @@ class TrackerNode(Node):
             self.pub.publish(msg_vuoto)
             return
 
-        # PREDIZIONE KALMAN
+        # PREDIZIONE KALMAN — dt aggiornato al ritmo effettivo della catena
+        dt = self._calcola_dt()
+        self.evoluzione_stato[0, 2] = dt
+        self.evoluzione_stato[1, 3] = dt
+
         self.stato_stimato = self.evoluzione_stato @ self.stato_stimato
         self.incertezza_corrente = (
             self.evoluzione_stato @ self.incertezza_corrente
@@ -124,7 +161,9 @@ class TrackerNode(Node):
             # Smorza la velocità stimata per ridurre predizioni errate
             self.stato_stimato[2] *= 0.6
             self.stato_stimato[3] *= 0.6
-            
+
+            self.ultima_area = msg.z
+
             # Pubblica la posizione stimata aggiornata
             posizione_stimata = Point()
             posizione_stimata.x = float(self.stato_stimato[0].item())
@@ -142,11 +181,13 @@ class TrackerNode(Node):
                 self.pub.publish(msg_perso)
                 return
             
-            # Pubblica la predizione per tollerare micro-interruzioni
+            # Pubblica la predizione per tollerare micro-interruzioni.
+            # `z` porta l'ultima area valida, non lo zero del messaggio in
+            # ingresso: la stima è utilizzabile e va marcata come tale.
             posizione_stimata = Point()
             posizione_stimata.x = float(self.stato_stimato[0].item())
             posizione_stimata.y = float(self.stato_stimato[1].item())
-            posizione_stimata.z = float(msg.z)
+            posizione_stimata.z = float(self.ultima_area)
             self.pub.publish(posizione_stimata)
             # self.get_logger().info(
             #     f'Tentativo predizione — Frame persi: {self.frame_senza_segnale}/{self.soglia_perdita}')

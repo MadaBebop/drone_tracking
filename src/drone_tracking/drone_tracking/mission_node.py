@@ -82,8 +82,12 @@ class MissionNode(Node):
         self.ricerca_raggio   = 3.0
         self.ricerca_t        = 0.0
         self.ricerca_espansione = 0.0
-        self.frame_senza_bersaglio = 0
-        self.soglia_avvia_ricerca = 20  # frame (~2 sec) prima di avviare ricerca
+        # Attesa prima di dichiarare perso il bersaglio, in SECONDI. Era un
+        # conteggio di frame tarato su 10 Hz, ma /target/tracked_position segue
+        # il ritmo della telecamera (5-13 Hz): la stessa soglia valeva fra 1.5 e
+        # 4 secondi a seconda del carico della macchina.
+        self.istante_perdita     = None
+        self.soglia_avvia_ricerca_s = 2.0
 
     def on_position(self, msg: PoseStamped):
         self.posizione_attuale = msg.pose.position
@@ -99,8 +103,10 @@ class MissionNode(Node):
         # Gestione perdita bersaglio in fase AGGANCIO
         if self.fase == FaseMissione.AGGANCIO:
             if not target_visibile:
-                self.frame_senza_bersaglio += 1
-                if self.frame_senza_bersaglio > self.soglia_avvia_ricerca:
+                adesso = self.get_clock().now().nanoseconds / 1e9
+                if self.istante_perdita is None:
+                    self.istante_perdita = adesso
+                elif adesso - self.istante_perdita > self.soglia_avvia_ricerca_s:
                     self.get_logger().warn('Bersaglio perso — avvio ricerca')
                     if self.posizione_attuale:
                         self.ricerca_centro_x = self.posizione_attuale.x
@@ -109,8 +115,9 @@ class MissionNode(Node):
                     self.ricerca_espansione = 0.0
                     self.fase = FaseMissione.RICERCA
                     self.bersaglio_agganciato = False
+                    self.istante_perdita = None
             else:
-                self.frame_senza_bersaglio = 0
+                self.istante_perdita = None
             return
 
         # Gestione riaggancio in fase RICERCA
@@ -120,7 +127,7 @@ class MissionNode(Node):
                 if self.frame_bersaglio_visibile >= self.frame_conferma_richiesti:
                     self.get_logger().warn('Bersaglio riagganciato')
                     self.bersaglio_agganciato = True
-                    self.frame_senza_bersaglio = 0
+                    self.istante_perdita = None
                     self.fase = FaseMissione.AGGANCIO
             else:
                 self.frame_bersaglio_visibile = 0

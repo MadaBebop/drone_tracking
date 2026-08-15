@@ -472,11 +472,17 @@ Muove la sfera rossa in Gazebo via `gz service set_pose`, con due comportamenti:
 | `PATTUGLIO` | Orbita circolare attorno a `(20, 20)`, raggio 3 m |
 | `EVASIONE` | Fuga in linea retta nella direzione opposta al drone, per 15 s |
 
-L'evasione scatta **5 secondi dopo** che la missione è entrata in `AGGANCIO`: il
-bersaglio si comporta come un veicolo che si accorge di essere inseguito e
-reagisce con un ritardo realistico. Terminata la fuga riprende a orbitare attorno
-alla nuova posizione — è ciò che mette davvero alla prova il tracker e la fase di
-`RICERCA`.
+L'evasione scatta dopo che la missione è entrata in `AGGANCIO`: il bersaglio si
+comporta come un veicolo che si accorge di essere inseguito e reagisce con un
+ritardo. Terminata la fuga riprende a orbitare attorno alla nuova posizione — è
+ciò che mette davvero alla prova il tracker e la fase di `RICERCA`.
+
+Il ritardo è `ritardo_evasione_s = 10.0`, misurato sull'orologio e non contando
+messaggi. Il conteggio riparte da capo se l'aggancio si interrompe: il bersaglio
+fugge solo dopo essere stato inseguito per **10 secondi consecutivi**, quindi con
+un tracking discontinuo il ritardo osservato è più lungo. Terminata la fuga di
+`durata_evasione_s = 49.0` secondi riprende a orbitare attorno alla nuova
+posizione.
 
 Il comportamento osservato in simulazione è quello descritto sopra: è questo nodo
 a muovere il bersaglio. Il modello nel world dichiara anche un plugin
@@ -643,6 +649,68 @@ ottenere una fisica fluida, la modalità server-only (`gz sim -s`). Nel containe
 **Conflitto sulla porta 9002** — la porta usata di default per il canale
 ArduPilot ↔ Gazebo viene occupata da un processo Ruby interno a Gazebo. Il
 progetto usa 9012/9013.
+
+## Due orologi, non uno
+
+È la chiave per capire il resto di questa sezione. Nel sistema convivono due
+famiglie di nodi con nature diverse.
+
+**Guidati da timer** — battono a frequenza fissa, decisa da loro soli:
+`mission_node` a 2 Hz (`create_timer(0.5, …)`), `jammer_node`, la
+ripubblicazione di `controller_node` e `target_mover_node` a 10 Hz.
+
+**Guidati da callback** — non hanno frequenza propria: ereditano quella di chi
+sta a monte. E a monte dell'intera catena di percezione c'è la telecamera di
+Gazebo, l'unico elemento la cui velocità dipende dal carico della macchina anziché
+da una costante.
+
+Un nodo a callback può solo *perdere* messaggi, mai crearne, quindi il ritmo cala
+scendendo la catena. Misure simultanee su 20 s di missione:
+
+| Topic | Frequenza | Note |
+|---|---|---|
+| `/drone/camera/image_raw` | 15.5 Hz | sorgente, limitata dal rendering |
+| `/target/position` | 15.5 Hz | detector, 1:1 coi frame |
+| `/target/jammed_position` | 13.5 Hz | limitatore del jammer a 50 ms |
+| `/target/tracked_position` | 13.5 Hz | nessuna perdita |
+| `/mission/stato` | 2.0 Hz | orologio indipendente |
+
+I 2 Hz di `/mission/stato` non hanno alcun rapporto con i 15 Hz del detector: non
+sono lo stesso orologio. Confonderli è stata l'origine di diversi bug, ora
+corretti — vedi sotto.
+
+**Tempi in secondi, non in conteggi di messaggi** — tutti i ritardi e i `dt` sono
+ora misurati sull'orologio, non contando messaggi ricevuti. In precedenza erano
+costanti tarate su un ipotetico 10 Hz che quasi nessun topic rispetta, con effetti
+concreti:
+
+| Costante | Comportamento reale prima | Ora |
+|---|---|---|
+| Ritardo di evasione | 50 conteggi su un topic a 2 Hz → **25 s** invece di 5 | `ritardo_evasione_s = 10.0` |
+| `dt` del Kalman | fisso a 0.1 con ingresso fra 5 e 15 Hz | ricavato dai tempi reali |
+| Derivata del controller | divisione per 0.1 fisso | divisione per il `dt` misurato |
+| Soglia di avvio ricerca | 20 frame → fra 1.5 e 4 s secondo il carico | `soglia_avvia_ricerca_s = 2.0` |
+
+**Il bersaglio girava a un terzo della velocità prevista** — `target_mover_node`
+comandava la posa con `subprocess.run`, che **attende** la fine del processo. Una
+chiamata `gz service set_pose` impiega ~360 ms (misurato), quindi il timer
+dichiarato a 10 Hz girava in realtà a ~2.8 Hz. I parametri di moto erano di fatto
+tarati contro quel timer strozzato. Ora la chiamata parte in background con
+`Popen` e l'esito si verifica al ciclo successivo — gli errori restano visibili,
+il timer resta libero — e le velocità sono espresse in unità al secondo,
+calibrate per riprodurre il comportamento osservato in precedenza.
+
+**Il tracker perdeva un messaggio a ogni riacquisizione** — sul frame di
+acquisizione il nodo usciva senza pubblicare. Sotto jamming, dove le
+riacquisizioni sono continue, questo costava il **19%** dei messaggi
+(9.2 Hz in uscita contro 11.4 in ingresso). Ora la posizione appena acquisita
+viene pubblicata subito, e la catena non perde più nulla.
+
+**Il tracker marcava le proprie predizioni come "bersaglio assente"** — durante
+una perdita di segnale pubblicava la stima di Kalman ricopiando `z` dal messaggio
+in ingresso, che vale 0, cioè il codice convenzionale di assenza. I nodi a valle
+non ne soffrivano perché decidono su `x`/`y`, ma chiunque seguisse la convenzione
+documentata avrebbe scartato stime valide. Ora `z` porta l'ultima area valida.
 
 **Frame rate della telecamera nel container** — il sensore dichiara
 `<update_rate>30</update_rate>`, ma in headless senza GPU Gazebo renderizza via
