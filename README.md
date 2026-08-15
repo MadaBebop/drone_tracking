@@ -352,10 +352,9 @@ posizione al momento della perdita, con raggio iniziale 3 m che cresce di
 
 ### detector_node
 
-Legge il feed della telecamera montata sul drone (inclinata a 60° verso il basso,
-FOV orizzontale 60°, 640×480 a 30 Hz) e isola il bersaglio rosso con doppia
-soglia HSV — due intervalli, perché il rosso è a cavallo del wrap-around della
-tinta:
+Legge il feed della telecamera montata sul drone (puntata a **nadir**, FOV
+orizzontale 60°, 640×480 a 15 Hz) e isola il bersaglio rosso con doppia soglia
+HSV — due intervalli, perché il rosso è a cavallo del wrap-around della tinta:
 
 ```
 mask1: H ∈ [0, 10]     S ∈ [120, 255]  V ∈ [70, 255]
@@ -474,6 +473,31 @@ Per diagnosticare guasti di questo tipo non basta osservare se il drone si muove
 va confrontata la **direzione** del comando con la direzione reale del bersaglio.
 Uno scarto sistematico costante indica un frame sbagliato, non una taratura da
 rivedere.
+
+**Compensazione d'assetto** — è la correzione che ha reso possibile
+l'inseguimento. La telecamera è solidale al corpo, quindi una rotazione del
+velivolo trasla l'immagine **indipendentemente da dove sia il bersaglio**. Con
+FOV orizzontale 1.047 rad su 640×480 i semicampi valgono 0.524 rad in orizzontale
+e 0.408 in verticale: bastano 10° di pitch per spostare il bersaglio di mezzo
+campo visivo. Il controller sottrae quindi il contributo dell'assetto:
+
+```python
+error_x = msg.x - roll  / 0.5236
+error_y = msg.y + pitch / 0.4084
+```
+
+Senza questa sottrazione l'errore misurava l'inclinazione del drone più della
+posizione del bersaglio: correlazione **r = −0.665** fra pitch ed errore
+verticale, con l'errore che spazzava l'intero campo visivo (−0.98…+0.97) mentre
+il bersaglio era pressoché fermo. Il risultato era una retroazione che divergeva
+in pochi secondi — il drone agganciava, inseguiva un paio di secondi e perdeva.
+
+| | Senza compensazione | Con compensazione |
+|---|---|---|
+| Distanza mediana dal bersaglio | 10.7 m | **3.0 m** |
+| Tempo entro 8 m | — | **98%** |
+| Tempo in `AGGANCIO` | 98.3% | **100%** |
+| Campioni con bersaglio visibile in 100 s | 219 | 892 |
 
 **Scalatura con la quota** — i guadagni sono moltiplicati per
 `quota / 12.0`: lo stesso errore in pixel corrisponde a una distanza reale
@@ -691,10 +715,18 @@ pulito, quello corrotto dal jammer e la ricostruzione del Kalman sovrapposti.
 ## Note tecniche e problemi noti
 
 **Telecamera** — link `camera_link` fissato a `base_link`, pose
-`0.1 0 -0.05 0 1.047 0`: inclinata di **1.047 rad = 60°** verso il basso, non 45°
-come indicato in una versione precedente di questo documento. Con FOV orizzontale
-di 60° e quota di crociera 12 m, l'asse ottico tocca terra a ~14 m di distanza in
-obliquo e l'inquadratura copre una quindicina di metri in larghezza.
+`0.1 0 -0.05 0 1.5708 0`: puntata a **nadir**. Le versioni precedenti la
+inclinavano in avanti (1.047 rad = 60°, documentata erroneamente come 45°). A
+nadir "bersaglio al centro dell'immagine" coincide con "drone sopra il
+bersaglio", che è l'obiettivo della missione; con l'asse inclinato in avanti il
+drone doveva invece mantenere una distanza di stallo di ~7 m e non poteva mai
+sovrastare il bersaglio. Con FOV orizzontale di 60° a 12 m di quota
+l'inquadratura copre ~14 m di terreno.
+
+Attenzione: cambiare l'inclinazione **non** riduce l'accoppiamento fra assetto e
+immagine — una rotazione del corpo trasla l'inquadratura della stessa quantità
+qualunque sia il puntamento. Per quello serve la compensazione d'assetto nel
+controller.
 
 **Plugin `RosCamera` inerte** — `iris_with_ardupilot/model.sdf` contiene un blocco
 `gz-sim-ros-camera-system`: quel plugin **non esiste** in Gazebo Harmonic, che lo

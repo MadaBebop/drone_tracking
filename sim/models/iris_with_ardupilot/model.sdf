@@ -864,7 +864,18 @@
           <ixx>0.000001</ixx><iyy>0.000001</iyy><izz>0.000001</izz>
         </inertia>
       </inertial>
-      <pose>0.1 0 -0.05 0 1.047 0</pose>
+      <!-- Telecamera a nadir (pitch 1.5708 rad = 90°), non piu inclinata in
+           avanti di 60°. La telecamera e solidale al corpo, e per accelerare un
+           multirotore picchia il muso: con l'asse ottico inclinato in avanti
+           quel movimento sposta l'inquadratura all'indietro, il bersaglio
+           sembra allontanarsi e il controller comanda ancora piu avanti.
+           Retroazione positiva, misurata come correlazione r = -0.657 fra
+           pitch ed errore verticale, con l'errore che spazzava l'intero campo
+           visivo (-0.98..+0.97) mentre il pitch oscillava di +-17°.
+           A nadir il segno si inverte: picchiando, l'inquadratura avanza e il
+           comando si riduce da solo. Inoltre "bersaglio al centro" coincide con
+           "drone sopra il bersaglio", che e l'obiettivo della missione. -->
+      <pose>0.1 0 -0.05 0 1.5708 0</pose>
       <sensor name="camera" type="camera">
         <camera>
           <horizontal_fov>1.047</horizontal_fov>

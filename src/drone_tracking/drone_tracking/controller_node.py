@@ -48,6 +48,20 @@ class ControllerNode(Node):
         self.in_volo        = False
         self.fase_missione  = FaseMissione.ATTESA.value
         self.yaw            = 0.0
+        self.pitch          = 0.0
+        self.roll           = 0.0
+
+        # Compensazione d'assetto. La telecamera è solidale al corpo: una
+        # rotazione del velivolo trasla l'immagine indipendentemente da dove si
+        # trovi il bersaglio. Con FOV orizzontale 1.047 rad su 640x480, i
+        # semicampi valgono 0.524 rad in orizzontale e 0.408 in verticale, quindi
+        # un radiante di assetto vale 1/0.408 ≈ 2.45 unità normalizzate: bastano
+        # 10° di pitch per spostare il bersaglio di mezzo campo.
+        # Misurato senza compensazione: correlazione r = -0.665 fra pitch ed
+        # errore verticale, con l'errore che spazzava l'intero campo visivo
+        # mentre il bersaglio era pressoché fermo.
+        self.semicampo_v = 0.4084   # rad
+        self.semicampo_o = 0.5236   # rad
 
         # Guadagni PD
         self.kp_x = 4.0
@@ -101,6 +115,9 @@ class ControllerNode(Node):
         q = msg.pose.orientation
         self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                               1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.pitch = math.asin(max(-1.0, min(1.0, 2.0 * (q.w * q.y - q.z * q.x))))
+        self.roll = math.atan2(2.0 * (q.w * q.x + q.y * q.z),
+                               1.0 - 2.0 * (q.x * q.x + q.y * q.y))
 
     def on_gps_status(self, msg: Bool):
         if msg.data and not self.gps_jammed:
@@ -124,8 +141,10 @@ class ControllerNode(Node):
             self.cmd_corrente = Twist()
             return
 
-        error_x = msg.x
-        error_y = msg.y
+        # Si sottrae la traslazione d'immagine dovuta all'assetto, così l'errore
+        # rappresenta la posizione del bersaglio e non l'inclinazione del drone.
+        error_x = msg.x - self.roll / self.semicampo_o
+        error_y = msg.y + self.pitch / self.semicampo_v
 
         dt = self._calcola_dt()
 

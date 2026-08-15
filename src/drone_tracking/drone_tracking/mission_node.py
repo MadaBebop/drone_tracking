@@ -71,6 +71,12 @@ class MissionNode(Node):
         self.fase = FaseMissione.ATTESA
 
         self.frame_conferma_richiesti = 5
+        # In RICERCA il bersaglio attraversa il campo visivo di sfuggita: cinque
+        # frame consecutivi (~0.45 s) sono spesso piu di quanto duri il
+        # passaggio, e il riaggancio non scattava mai. Per riagganciare bastano
+        # meno conferme: il rischio di un falso positivo e accettabile, visto che
+        # l'alternativa e continuare a cercare a vuoto.
+        self.frame_conferma_riaggancio = 2
         self.frame_bersaglio_visibile = 0
         
         self.timer = self.create_timer(0.5, self.aggiorna_missione)
@@ -138,7 +144,7 @@ class MissionNode(Node):
         if self.fase == FaseMissione.RICERCA:
             if target_visibile:
                 self.frame_bersaglio_visibile += 1
-                if self.frame_bersaglio_visibile >= self.frame_conferma_richiesti:
+                if self.frame_bersaglio_visibile >= self.frame_conferma_riaggancio:
                     self.get_logger().warn('Bersaglio riagganciato')
                     self.bersaglio_agganciato = True
                     self.istante_perdita = None
