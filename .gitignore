@@ -5,3 +5,6 @@ build/
 __pycache__/
 *.pyc
 snapshots/
+
+# Relazione generata, non sorgente
+Drone_Tracking_Relazione.docx

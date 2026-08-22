@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vulnerabilità di sicurezza
+    url: https://github.com/MadaBebop/drone_tracking/blob/main/SECURITY.md
+    about: Non aprire una issue pubblica. Segui la procedura in SECURITY.md.
+  - name: Domande sulla procedura di avvio
+    url: https://github.com/MadaBebop/drone_tracking/blob/main/README.md
+    about: La sequenza completa e i problemi noti sono documentati nel README.

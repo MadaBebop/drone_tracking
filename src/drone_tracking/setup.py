@@ -20,7 +20,7 @@ setup(
     maintainer='mada',
     maintainer_email='riccardo.mahdavi@gmail.com',
     description='Drone tracking project',
-    license='Riccardo Mahdavi Daronkola',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',

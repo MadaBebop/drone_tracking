@@ -1134,3 +1134,16 @@ corregge la stima quando il datalink viene ripristinato.
 - ROS 2 Jazzy: https://docs.ros.org/en/jazzy
 - Kalman Filter: Welch & Bishop, *An Introduction to the Kalman Filter*, UNC Chapel Hill (2006)
 - CSIS, *Quantum Sensing and the Future of Warfare* (2025)
+
+---
+
+## Licenza
+
+Distribuito con licenza MIT. Vedi [LICENSE](LICENSE).
+
+## Contribuire
+
+Linee guida in [CONTRIBUTING.md](CONTRIBUTING.md), regole di convivenza in
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Per le vulnerabilità di sicurezza, e
+per le precauzioni da adottare prima di portare l'architettura su hardware reale,
+vedi [SECURITY.md](SECURITY.md).
