@@ -609,18 +609,19 @@ mv model.sdf model.sdf.bak
 ln -s "$HOME/Desktop/Progetto Drone/drone_tracking_ws/sim/models/iris_with_ardupilot/model.sdf" .
 ```
 
-**Parametri aggiuntivi del SITL**, gli stessi che il container carica da
-`docker/sitl-defaults.parm`:
+**Parametri aggiuntivi del SITL** — non c'è nulla da creare. Stanno in
+[docker/sitl-defaults.parm](docker/sitl-defaults.parm), versionato nel
+repository, e il comando T2 lo carica direttamente: container e VM leggono lo
+stesso file, quindi `git pull` aggiorna anche la taratura del volo. Il nome della
+cartella `docker/` è storico, il contenuto non ha nulla di specifico del
+container.
 
-```bash
-printf 'ARMING_SKIPCHK 1\n' > "$HOME/sitl-extra.parm"
-```
-
-Il nome conta: `ARMING_CHECK` **non esiste** in questa versione di ArduPilot e
-viene ignorato in silenzio, lasciando tutti i controlli attivi. Il parametro
-giusto è `ARMING_SKIPCHK`, con logica inversa — `1` significa "salta tutto".
-Senza, l'arming fallisce con `Arm: Gyros inconsistent` o `Accels inconsistent`,
-perché gli IMU simulati divergono quando la fisica singhiozza.
+Due note su quel file. `ARMING_CHECK` **non esiste** in questa versione di
+ArduPilot e viene ignorato in silenzio, lasciando tutti i controlli attivi: il
+parametro giusto è `ARMING_SKIPCHK`, con logica inversa, dove `1` significa
+"salta tutto". E i `SIM_*_RND` azzerano il rumore degli IMU simulati, perché
+quando la fisica singhiozza i tre giroscopi divergono e l'arming viene rifiutato
+con `Arm: Gyros inconsistent`, un controllo che `ARMING_SKIPCHK` non copre.
 
 ### Prima di ogni prova
 
@@ -644,7 +645,7 @@ gz sim -v4 -r "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/worlds/iris_runway.
 cd "$HOME/Desktop/Progetto Drone/ardupilot"
 ./build/sitl/bin/arducopter --model JSON --speedup 1 \
   --sim-address=127.0.0.1 --sim-port-in=9013 --sim-port-out=9012 \
-  -I0 --defaults Tools/autotest/default_params/gazebo-iris.parm,$HOME/sitl-extra.parm
+  -I0 --defaults Tools/autotest/default_params/gazebo-iris.parm,"$HOME/Desktop/Progetto Drone/drone_tracking_ws/docker/sitl-defaults.parm"
 ```
 
 **T3 — MAVProxy**
@@ -702,7 +703,7 @@ takeoff 12
 ```
 
 I controlli di arming sono già disabilitati da `ARMING_SKIPCHK 1`, caricato
-all'avvio del SITL da `sitl-extra.parm`. Se l'arming viene rifiutato con
+all'avvio del SITL da `docker/sitl-defaults.parm`. Se l'arming viene rifiutato con
 `Arm: Gyros inconsistent`, quel file non è stato caricato: si può impostare il
 parametro a mano con `param set ARMING_SKIPCHK 1` prima di `arm throttle`.
 
@@ -1073,7 +1074,7 @@ Quest'ultimo non esiste in questa versione di ArduPilot e viene **ignorato in
 silenzio**: si crede di aver disabilitato i controlli e invece sono tutti
 attivi. `ARMING_SKIPCHK` ha inoltre logica inversa — `1` significa "salta
 tutto", non "controlla tutto". Il valore corretto è caricato all'avvio da
-`docker/sitl-defaults.parm` nel container e da `sitl-extra.parm` sulla VM.
+`docker/sitl-defaults.parm`, caricato da entrambi gli ambienti tramite --defaults.
 
 **Plugin `TrajectoryFollower` inerte** — il modello `bersaglio` dichiara un
 `gz-sim-trajectory-follower-system` con cinque waypoint, ma quel percorso non ha

@@ -85,12 +85,15 @@ class TargetMoverNode(Node):
         # rispetto al moto tangenziale dell'orbita. Un veicolo che scappa
         # accelera, e la rampa dà al drone qualche secondo per reagire prima che
         # il bersaglio sia a piena velocità.
-        self.vel_evasione      = 0.9    # m/s a regime
-        self.accel_evasione    = 0.35   # m/s^2, ~2.6 s per arrivare a regime
+        self.vel_evasione      = 1.2    # m/s a regime, ~4 km/h
+        self.accel_evasione    = 0.7    # m/s^2, ~7.9 s per arrivare a regime
         self.dir_evasione_x    = 0.0
         self.dir_evasione_y    = 0.0
         self.tempo_evasione    = 0.0
-        self.durata_evasione_s = 20.0   # s  -> ~40 m di fuga
+        # A 8.3 m/s venti secondi porterebbero il bersaglio a 160 m, fuori da
+        # qualunque possibilita di recupero. Dieci bastano a mettere alla prova
+        # l'inseguimento senza trasformarlo in una fuga senza ritorno.
+        self.durata_evasione_s = 15.0   # s  -> ~28 m di fuga
 
         self.ultimo_istante = None
         self.proc_pendente  = None

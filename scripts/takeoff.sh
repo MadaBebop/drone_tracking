@@ -59,8 +59,19 @@ chiama "set_mode GUIDED" /mavros/set_mode mavros_msgs/srv/SetMode \
     "{base_mode: 0, custom_mode: 'GUIDED'}"
 sleep 2
 
+# L'arming puo essere rifiutato in modo transitorio: se la fisica ha singhiozzato,
+# gli IMU simulati risultano incoerenti per qualche secondo. Si riprova.
 echo "→ Arming"
-chiama "arming" /mavros/cmd/arming mavros_msgs/srv/CommandBool "{value: true}"
+for tentativo in 1 2 3 4 5; do
+    if chiama "arming (tentativo $tentativo)" /mavros/cmd/arming             mavros_msgs/srv/CommandBool "{value: true}"; then
+        break
+    fi
+    if [ "$tentativo" = 5 ]; then
+        echo "   arming rifiutato 5 volte: controlla il pannello 'mavproxy'." >&2
+        exit 1
+    fi
+    sleep 3
+done
 sleep 2
 
 echo "→ Decollo a ${QUOTA} m"

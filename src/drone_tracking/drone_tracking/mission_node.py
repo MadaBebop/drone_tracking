@@ -64,8 +64,11 @@ class MissionNode(Node):
         self.posizione_attuale = None
         self.bersaglio_agganciato = False
         
-        # Soglia a 1.2 metri
-        self.soglia_waypoint = 1.2  
+        # Tolleranza sul waypoint. Alzata da 1.2 a 3.0 m: con 1.2 il drone doveva
+        # arrivare quasi fermo per centrare il punto, e a velocita di crociera lo
+        # sorpassava e tornava indietro, oscillando. Tre metri su un circuito di
+        # 20 non cambiano il percorso e permettono di non frenare.
+        self.soglia_waypoint = 3.0
         
         self.rilevamento_attivo = False
         self.fase = FaseMissione.ATTESA

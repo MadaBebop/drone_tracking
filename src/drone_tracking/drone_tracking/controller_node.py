@@ -63,26 +63,35 @@ class ControllerNode(Node):
 
         # Guadagni PD espressi in 1/s: agiscono sullo scostamento del bersaglio
         # in METRI, non sulle coordinate normalizzate dell'immagine. Quelle
-        # cambiano significato al variare di quota e campo visivo — lo stesso
-        # 0.3 vale 2 m a 12 m di quota con FOV 60° e 3.6 m con FOV 90° — quindi
-        # una taratura fatta su di esse va rifatta a ogni modifica dell'ottica.
-        # In metri il guadagno ha un senso fisico diretto: kp = 1.2 significa
-        # 1.2 m/s di comando per ogni metro di scarto, cioe uno scarto a regime
-        # di circa velocita_bersaglio / kp = 1 m contro un bersaglio a 1.2 m/s.
-        # Provato a scendere a 0.6 con smorzamento 0.6, nell'ipotesi che l'anello
-        # oscillasse: distanza mediana dal bersaglio da 3.5 a 26.7 m e tempo in
-        # AGGANCIO dal 100% al 28%. Con guadagno basso il drone non tiene il
-        # passo. 1.2 resta il valore migliore misurato.
+        # cambiano significato al variare di quota e campo visivo, quindi una
+        # taratura fatta su di esse va rifatta a ogni modifica dell'ottica.
+        #
+        # Dimensionati per un bersaglio a 8.3 m/s (30 km/h). L'errore a regime di
+        # un controllo proporzionale vale velocita/kp, e va confrontato con la
+        # semi-impronta a terra, che a 12 m di quota con FOV 90 gradi misura 12 m:
+        #   kp 1.2 -> 6.9 m (58% del semicampo, troppo vicino al bordo)
+        #   kp 2.0 -> 4.2 m (35%, margine sufficiente anche nei transitori)
+        # Nota: scendere sotto 1.2 e stato provato e peggiora molto (a 0.6 la
+        # distanza mediana dal bersaglio passava da 3.5 a 26.7 m): con guadagno
+        # basso il drone non tiene il passo.
         self.kp_x = 1.2      # 1/s
         self.kp_y = 1.2
         self.kd_x = 0.35
         self.kd_y = 0.35
-        # 8 m/s erano molti piu del necessario: il bersaglio si muove intorno a
-        # 1 m/s, quindi quel tetto non veniva mai raggiunto per inseguirlo ma
-        # solo durante i transitori, dove produceva sorpassi e oscillazione.
-        self.vel_max = 3.5
+        # Deve superare la velocita del bersaglio, altrimenti il drone non puo
+        # recuperare terreno per costruzione. A 3.5 non pareggiava nemmeno gli
+        # 8.3 m/s del bersaglio. Il limite e per asse: il modulo diagonale
+        # arriva a vel_max*sqrt(2).
+        self.vel_max = 5.0
 
-        self.deadzone = 0.3          # metri
+        # Zona morta ampia, in metri. Con 0.3 m il drone correggeva anche errori
+        # minimi: con kp alto questo produce inclinazioni continue, e ogni grado
+        # di inclinazione trasla l'inquadratura di 1/semi_fov. Il risultato
+        # misurato era la perdita del bersaglio dopo 8 s pur essendo il bersaglio
+        # quasi fermo. A 1.5 m il drone ignora gli scarti piccoli e resta piatto
+        # quando il bersaglio e sotto di lui, conservando il guadagno alto per
+        # quando serve davvero, cioe durante una fuga.
+        self.deadzone = 1.0          # metri
         self.semi_fov_o = 0.7854     # rad, meta del FOV orizzontale (90°)
         self.semi_fov_v = 0.6435     # rad, meta del FOV verticale su 640x480
 

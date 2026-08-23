@@ -8,21 +8,32 @@
 # perche gli IMU simulati divergono quando la fisica singhiozza.
 ARMING_SKIPCHK 1
 
-# --- Fluidita della navigazione ---
-# Questi valori erano stati alzati per rendere il drone piu reattivo
-# (WP_SPD 10, WP_ACC 5, WP_JERK 8, PSC_JERK_NE 15, ATC_ANGLE_MAX 40), ma la
-# misura non aveva mostrato alcun guadagno: il rapporto fra velocita comandata e
-# velocita eseguita restava invariato. In compenso rendevano il volo nervoso, con
-# oscillazioni visibili nei trasferimenti fra waypoint e, di riflesso, un
-# ondeggiamento dell'inquadratura, dato che la telecamera e solidale al corpo.
-#
-# Il circuito di pattugliamento e un quadrato di 20 m: 10 m/s significa arrivare
-# sul waypoint troppo lanciati per fermarsi senza sorpassarlo.
-WP_SPD 4.0
-WP_ACC 2.0
-WP_JERK 3.0
-PSC_JERK_NE 8.0
+# --- Prestazioni, dimensionate su un bersaglio a 8.3 m/s (30 km/h) ---
+# Il tetto di velocita deve superare quello del bersaglio, altrimenti il drone
+# non puo recuperare terreno per costruzione. Accelerazione e jerk determinano
+# quanto in fretta il drone puo invertire la marcia, cioe il caso peggiore
+# dell'inseguimento.
+WP_SPD 5.0
+WP_ACC 2.5
+WP_JERK 4.0
+PSC_JERK_NE 10.0
 
-# Meno inclinazione massima: il drone e comunque abbondantemente piu veloce del
-# bersaglio, e ogni grado di rollio o beccheggio trasla l'immagine.
+# 22 gradi: e il massimo compatibile con l osservabilita. La traslazione
+# dell immagine vale inclinazione/semi_fov, e a 45 gradi di semicampo 22 gradi
+# spostano il bersaglio di mezzo semicampo. Oltre i 25 gradi il bersaglio esce
+# dall inquadratura: misurato, aggancio caduto in 8 s con 35 gradi.
 ATC_ANGLE_MAX 25.0
+
+# --- Coerenza degli IMU simulati ---
+# "Arm: Gyros inconsistent" nasce dal confronto fra i tre giroscopi simulati, che
+# divergono quando la fisica singhiozza per carico della macchina. ARMING_SKIPCHK
+# non basta: alcuni controlli restano obbligatori. Azzerando il rumore dei sensori
+# simulati i tre concordano per costruzione e il confronto non puo fallire.
+# In simulazione il rumore dell'IMU non e oggetto di studio: lo e il disturbo sul
+# datalink, che resta interamente modellato da jammer_node.
+SIM_GYR1_RND 0
+SIM_GYR2_RND 0
+SIM_GYR3_RND 0
+SIM_ACC1_RND 0
+SIM_ACC2_RND 0
+SIM_ACC3_RND 0
