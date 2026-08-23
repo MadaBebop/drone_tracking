@@ -1,10 +1,6 @@
 # Parametri applicati al SITL in aggiunta a Tools/autotest/default_params/gazebo-iris.parm
 # (ArduPilot accetta piu file in --defaults, separati da virgola).
-#
-# Il backend JSON con Gazebo fallisce spesso i prearm check sui sensori simulati.
-# Impostarlo qui evita di doverlo fare a runtime: via MAVROS il set fallisce
-# finche il pull dei parametri dal firmware non e completo, e il timing non e
-# prevedibile.
+
 # ATTENZIONE al nome: in questa versione di ArduPilot il parametro NON si chiama
 # ARMING_CHECK, che non esiste e viene ignorato in silenzio lasciando tutti i
 # controlli attivi. Si chiama ARMING_SKIPCHK e ha logica inversa: 1 = salta tutto.
@@ -12,16 +8,21 @@
 # perche gli IMU simulati divergono quando la fisica singhiozza.
 ARMING_SKIPCHK 1
 
-# --- Reattivita in GUIDED ---
-# I default sono tarati per voli di trasferimento dolci, non per inseguire un
-# bersaglio che cambia direzione di continuo. Il freno peggiore e il jerk: a
-# 1.0 m/s^3 servono 2.5 secondi per arrivare all'accelerazione massima, quindi il
-# drone passa l'inseguimento a "prendere l'abbrivio" e arriva sempre tardi.
+# --- Fluidita della navigazione ---
+# Questi valori erano stati alzati per rendere il drone piu reattivo
+# (WP_SPD 10, WP_ACC 5, WP_JERK 8, PSC_JERK_NE 15, ATC_ANGLE_MAX 40), ma la
+# misura non aveva mostrato alcun guadagno: il rapporto fra velocita comandata e
+# velocita eseguita restava invariato. In compenso rendevano il volo nervoso, con
+# oscillazioni visibili nei trasferimenti fra waypoint e, di riflesso, un
+# ondeggiamento dell'inquadratura, dato che la telecamera e solidale al corpo.
 #
-# ATTENZIONE ai nomi: da Copter 4.7 sono stati rinominati in unita SI.
-# Su firmware precedenti si chiamano WPNAV_ACCEL (cm/s^2), WPNAV_SPEED (cm/s)
-# e ANGLE_MAX (centesimi di grado), e queste righe verranno ignorate.
-WP_ACC 5.0
-WP_JERK 8.0
-PSC_JERK_NE 15.0
-ATC_ANGLE_MAX 40.0
+# Il circuito di pattugliamento e un quadrato di 20 m: 10 m/s significa arrivare
+# sul waypoint troppo lanciati per fermarsi senza sorpassarlo.
+WP_SPD 4.0
+WP_ACC 2.0
+WP_JERK 3.0
+PSC_JERK_NE 8.0
+
+# Meno inclinazione massima: il drone e comunque abbondantemente piu veloce del
+# bersaglio, e ogni grado di rollio o beccheggio trasla l'immagine.
+ATC_ANGLE_MAX 25.0

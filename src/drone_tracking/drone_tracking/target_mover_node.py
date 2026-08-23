@@ -76,12 +76,17 @@ class TargetMoverNode(Node):
         self.velocita_angolare = 0.35   # rad/s
 
         # Parametri evasione. Il limite non è la velocità massima del drone
-        # (8 m/s) ma l'errore a regime del controllo proporzionale, che vale
-        # circa `velocita_bersaglio / kp`: con kp = 4.0, a 2 m/s il bersaglio si
-        # stabilizzava a 0.5 in coordinate normalizzate, cioè a metà del
-        # semicampo visivo, e la prima finestra di jamming lo faceva uscire.
-        # A 1.2 m/s l'errore a regime scende a ~0.3 e il margine regge.
-        self.vel_evasione      = 1.2    # m/s
+        # ma l'errore a regime del controllo proporzionale, che vale circa
+        # `velocita_bersaglio / kp`: più il bersaglio è veloce, più il drone lo
+        # insegue da lontano, finché non esce dall'inquadratura.
+        #
+        # La fuga parte da ferma e accelera: prima la velocità veniva applicata
+        # intera al primo istante, uno scalino sia in modulo sia in direzione
+        # rispetto al moto tangenziale dell'orbita. Un veicolo che scappa
+        # accelera, e la rampa dà al drone qualche secondo per reagire prima che
+        # il bersaglio sia a piena velocità.
+        self.vel_evasione      = 0.9    # m/s a regime
+        self.accel_evasione    = 0.35   # m/s^2, ~2.6 s per arrivare a regime
         self.dir_evasione_x    = 0.0
         self.dir_evasione_y    = 0.0
         self.tempo_evasione    = 0.0
@@ -156,8 +161,10 @@ class TargetMoverNode(Node):
 
         elif self.fase == FaseBersaglio.EVASIONE:
             self.tempo_evasione += dt
-            self.pos_x += self.dir_evasione_x * self.vel_evasione * dt
-            self.pos_y += self.dir_evasione_y * self.vel_evasione * dt
+            # Rampa di accelerazione, satura alla velocità di regime.
+            v = min(self.vel_evasione, self.accel_evasione * self.tempo_evasione)
+            self.pos_x += self.dir_evasione_x * v * dt
+            self.pos_y += self.dir_evasione_y * v * dt
 
             if self.tempo_evasione >= self.durata_evasione_s:
                 self.fase = FaseBersaglio.PATTUGLIO

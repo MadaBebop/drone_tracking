@@ -77,7 +77,10 @@ class ControllerNode(Node):
         self.kp_y = 1.2
         self.kd_x = 0.35
         self.kd_y = 0.35
-        self.vel_max = 8.0
+        # 8 m/s erano molti piu del necessario: il bersaglio si muove intorno a
+        # 1 m/s, quindi quel tetto non veniva mai raggiunto per inseguirlo ma
+        # solo durante i transitori, dove produceva sorpassi e oscillazione.
+        self.vel_max = 3.5
 
         self.deadzone = 0.3          # metri
         self.semi_fov_o = 0.7854     # rad, meta del FOV orizzontale (90°)
