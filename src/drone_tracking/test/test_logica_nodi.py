@@ -20,6 +20,7 @@ from geometry_msgs.msg import Point, PoseStamped
 from std_msgs.msg import Float64, String
 
 from drone_tracking.controller_node import ControllerNode
+from drone_tracking.gnss_denial_node import MODI, GnssDenialNode
 from drone_tracking.mission_node import FaseMissione, MissionNode
 from drone_tracking.tracker_node import TrackerNode
 
@@ -198,6 +199,37 @@ def test_predizione_estrapola_durante_la_perdita():
         assert dopo > prima, 'la predizione deve avanzare, non restare ferma'
     finally:
         nodo.destroy_node()
+
+
+def test_gnss_non_attacca_prima_dell_avvio():
+    """Arming e decollo hanno bisogno di un fix valido.
+
+    Negare il GPS a terra farebbe fallire il decollo per un motivo che non ha
+    niente a che vedere con l'esperimento, e il fallimento sarebbe facile da
+    attribuire al controllo invece che al banco di prova.
+    """
+    nodo = GnssDenialNode()
+    try:
+        nodo.fase_missione = FaseMissione.ATTESA.value
+        nodo.aggiorna()
+        assert nodo.attivo is False
+
+        nodo.fase_missione = FaseMissione.PATTUGLIAMENTO.value
+        nodo.aggiorna()
+        assert nodo.attivo is True
+
+        # Ritorno in ATTESA: l'attacco va rimosso, non lasciato attivo.
+        nodo.fase_missione = FaseMissione.ATTESA.value
+        nodo.aggiorna()
+        assert nodo.attivo is False
+    finally:
+        nodo.destroy_node()
+
+
+def test_gnss_ogni_modo_ha_un_valore_di_riposo_distinto():
+    for modo, (nome, attacco, riposo) in MODI.items():
+        assert nome.startswith('SIM_'), modo
+        assert attacco != riposo, modo
 
 
 def mission_in_aggancio():

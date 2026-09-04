@@ -64,6 +64,7 @@ class Monitor(Node):
         self.alt = None
         self.pos = None
         self.jammed = False
+        self.gnss_negato = False
         self.noise = 0.0
         self.raw = self.jam = self.trk = None
         self.cmd = None
@@ -77,6 +78,8 @@ class Monitor(Node):
                                  lambda m: setattr(self, 'pos', m.pose.position), best)
         self.create_subscription(Bool, '/gps/jammed',
                                  lambda m: setattr(self, 'jammed', m.data), 10)
+        self.create_subscription(Bool, '/gps/denial_active',
+                                 lambda m: setattr(self, 'gnss_negato', m.data), 10)
         self.create_subscription(Float32, '/rf/noise_level',
                                  lambda m: setattr(self, 'noise', m.data), 10)
         self.create_subscription(Point, '/target/position',
@@ -125,6 +128,13 @@ class Monitor(Node):
         else:
             jam_txt = f'{GRN}segnale pulito{R}  rumore RF {self.noise:.1f}'
 
+        # Sono due guasti distinti: il jamming sopra riguarda il canale con cui
+        # si rileva il bersaglio, questo il ricevitore satellitare del drone.
+        if self.gnss_negato:
+            gnss_txt = f'{RED}{B}GNSS SOTTO ATTACCO{R}'
+        else:
+            gnss_txt = f'{GRN}nominale{R}'
+
         rx, _ = self._xy(self.raw)
         jx, _ = self._xy(self.jam)
         tx, _ = self._xy(self.trk)
@@ -142,6 +152,7 @@ class Monitor(Node):
             f'  Quota       {alt}        Posizione   {xy}',
             f'  Camera      {self.hz():4.1f} Hz',
             f'  Datalink    {jam_txt}',
+            f'  GNSS drone  {gnss_txt}',
             '',
             f'{B}  Catena di percezione{R}  {DIM}(posizione orizzontale nel frame){R}',
             f'  detector    {val(rx)}  {barra(rx)}',

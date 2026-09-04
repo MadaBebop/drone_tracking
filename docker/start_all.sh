@@ -83,9 +83,13 @@ tmux new-window -t "$SESSION" -n mavros \
         -p plugin_denylist:=[distance_sensor]; exec bash"
 
 # --- T5: nodi del progetto + ponte immagini ros_gz ---
+# LAUNCH_ARGS passa argomenti al launch file senza modificare questo script:
+#   docker compose exec -e LAUNCH_ARGS="gnss_denial:=true" sim start_all.sh -d
+# Serve alle prove che cambiano configurazione, come il confronto fra GPS sano
+# e GPS sotto attacco.
 tmux new-window -t "$SESSION" -n nodes \
     "sleep 30; $SOURCES && \
-     ros2 launch drone_tracking tracking.launch.py; exec bash"
+     ros2 launch drone_tracking tracking.launch.py ${LAUNCH_ARGS:-}; exec bash"
 
 # --- T6: cruscotto live della missione ---
 tmux new-window -t "$SESSION" -n monitor \

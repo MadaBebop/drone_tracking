@@ -683,6 +683,104 @@ del progetto assume nullo.
 Alla chiusura il nodo stampa un riepilogo (campioni, percentuale di fotogrammi
 con bersaglio, distanza media, tempo per fase).
 
+### gnss_denial_node
+
+Attacca il ricevitore satellitare **del drone**, iniettando il disturbo nei
+parametri del SITL invece di simularlo a livello di topic: quello che viene
+messo alla prova è il sistema reale, autopilota compreso, non una sua
+imitazione. È un nodo distinto da `jammer_node` perché i due guasti sono
+fisicamente diversi — quello disturba il canale con cui il bersaglio viene
+rilevato, questo il GPS del velivolo — e confonderli era il difetto principale
+della prima versione, in cui `/gps/jammed` veniva pubblicato ma non guidava
+nulla.
+
+| Modo | Parametro | Effetto |
+|---|---|---|
+| `jamming` | `SIM_GPS1_JAM = 1` | fix intermittente: misurato `fix_type` da 6 a 1, satelliti da 10 a 3, accuratezza dichiarata fino a 191 m |
+| `negazione` | `SIM_GPS1_ENABLE = 0` | ricevitore muto, equivalente a un'antenna staccata |
+| `spoofing` | `SIM_GPS1_GLTCH_X/Y` | fix falsificato di un offset in gradi (0.0002° ≈ 22 m) |
+
+Non parte con lo stack: va abilitato esplicitamente, altrimenti non esisterebbe
+più una linea di riferimento con cui confrontarlo.
+
+```bash
+docker compose exec -e LAUNCH_ARGS="gnss_denial:=true gnss_modo:=negazione" sim start_all.sh --detach
+```
+
+Il nodo non tocca il GPS prima che la missione lasci `ATTESA`: arming e decollo
+hanno bisogno di un fix valido, e negarlo li farebbe fallire per un motivo che
+non ha niente a che vedere con l'esperimento. Le chiamate a `/mavros/param/set`
+sono asincrone — una risposta lenta bloccherebbe la pubblicazione di
+`/gps/denial_active`, falsando l'annotazione delle finestre di attacco nei dati
+— e alla chiusura i parametri vengono ripristinati, perché un attacco rimasto
+impostato farebbe partire la prova successiva con il GPS compromesso senza che
+nulla lo dica.
+
+---
+
+## Attacco al GNSS: cosa dicono le misure
+
+Il progetto è nato con l'affermazione di essere resistente al *GPS denial*.
+Verificarla ha prodotto tre risultati, tutti misurati prima di scrivere il nodo
+e riportati qui come sono, non come ci si aspettava.
+
+**1. Negare il GPS non degrada la navigazione.** Con il ricevitore spento per
+60 secondi, lo scarto fra la stima di posizione dell'autopilota e la verità a
+terra di Gazebo resta **sotto il metro e mezzo**, lo stesso valore che si misura
+con il GPS sano. Le ragioni appartengono all'autopilota, non a questo progetto:
+la quota viene dal barometro (`EK3_SRC1_POSZ = 1`), la navigazione inerziale non
+deriva in modo apprezzabile su tempi di questo ordine, e una missione dura
+un minuto.
+
+**2. Falsificare il GPS non inganna l'EKF.** Un offset di 22 m, applicato sia a
+gradino sia a rampa, si vede sul fix grezzo — verificato su
+`/mavros/global_position/raw/fix`, la latitudine passa da −35.3630816 a
+−35.362882 — ma la stima **non lo segue**. L'EKF rifiuta la misura incoerente
+con la propria predizione, che è il comportamento corretto di un filtro ben
+fatto.
+
+**3. La via di iniezione funziona.** La scrittura di un parametro
+dell'autopilota via `/mavros/param/set` risponde in 9-97 ms, quindi un nodo può
+pilotarla senza rischio di bloccarsi.
+
+Ne segue che **l'affermazione originale non è dimostrabile in questa
+configurazione**, non perché il sistema sia fragile ma perché la negazione del
+GNSS non produce, qui, un effetto a cui resistere. Cancellare l'affermazione
+sarebbe però sbagliato quanto tenerla: quello che si può dimostrare, e che è
+stato misurato, è che **l'inseguimento visivo non dipende dal GNSS**. Si esegue
+la stessa missione due volte, con GPS sano e con GPS negato per tutta la durata,
+e si confrontano durata dell'aggancio, distanza mediana e frazione di fotogrammi
+con bersaglio:
+
+```bash
+prova.sh gnss_off 50
+# ...riavvio con gnss_denial:=true gnss_modo:=negazione...
+prova.sh gnss_negato 50
+metriche.py confronta /ws/metrics/*gnss_off*.csv /ws/metrics/*gnss_negato*.csv
+```
+
+Il confronto, su 50 secondi simulati per prova, con il ricevitore spento nel
+99.2% dei campioni della seconda:
+
+| Indicatore | GPS sano | GPS negato |
+|---|---|---|
+| Sequenza delle fasi | `PATTUGLIAMENTO → AGGANCIO` | identica |
+| Durata dell'aggancio | 40.8 s | 42.0 s |
+| Distanza mediana | 2.21 m | 2.10 m |
+| Distanza minima | 0.28 m | 0.25 m |
+| Bersaglio rilevato | 82.6% | 82.9% |
+| Scarto stima-verità, mediano | 0.15 m | 0.15 m |
+| Scarto stima-verità, massimo | 1.24 m | 1.20 m |
+
+Le due colonne coincidono entro la banda di ripetibilità misurata (±3%).
+L'inseguimento visivo non usa il GNSS e la prova lo mostra; l'ultima riga dice
+però anche l'altra metà della storia, ovvero che **nemmeno la navigazione
+dell'autopilota degrada**, ed è la ragione per cui la resistenza alla negazione
+non è dimostrabile qui: non c'è nulla a cui resistere.
+
+Questa è la formulazione che le misure sostengono, e sostituisce quella che il
+progetto dichiarava senza prove.
+
 ---
 
 ## Misura e ripetibilità

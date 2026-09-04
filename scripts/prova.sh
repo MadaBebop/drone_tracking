@@ -31,6 +31,16 @@ CARTELLA="${CARTELLA_METRICHE:-/ws/metrics}"
 source /opt/ros/jazzy/setup.bash
 [ -f /ws/install/setup.bash ] && source /ws/install/setup.bash
 
+# Il file della prova in corso: e quello che metrics_node ha aperto all'avvio
+# della missione, e porta l'etichetta se ne e stata data una.
+file_prova() {
+    if [ -n "$ETICHETTA" ]; then
+        ls -t "$CARTELLA"/*"$ETICHETTA"*.csv 2>/dev/null | head -1
+    else
+        ls -t "$CARTELLA"/*.csv 2>/dev/null | head -1
+    fi
+}
+
 echo "→ Controllo che lo stack sia in piedi"
 NODI="$(ros2 node list 2>/dev/null || true)"
 for atteso in detector_node tracker_node controller_node mission_node metrics_node; do
@@ -70,17 +80,6 @@ fi
 
 echo "→ Avvio missione"
 ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true" >/dev/null
-sleep 2
-
-# Il file della prova in corso: e quello che metrics_node ha aperto all'avvio
-# della missione, e porta l'etichetta se ne e stata data una.
-file_prova() {
-    if [ -n "$ETICHETTA" ]; then
-        ls -t "$CARTELLA"/*"$ETICHETTA"*.csv 2>/dev/null | head -1
-    else
-        ls -t "$CARTELLA"/*.csv 2>/dev/null | head -1
-    fi
-}
 
 # Il tempo di simulazione si legge dalla prima colonna del CSV. Prima si
 # chiedeva a `ros2 topic echo /clock`, che pero intercala nell'uscita l'avviso
@@ -95,6 +94,21 @@ ora_sim() {
         tail -1 "$f" | cut -d, -f1 | cut -d. -f1
     fi
 }
+
+# metrics_node apre il file della prova quando la missione lascia ATTESA, cosa
+# che avviene al ciclo successivo del suo timer: mezzo secondo SIMULATO, che a
+# 0.25x sono due secondi di orologio. Una pausa fissa qui era troppo corta e la
+# prova si interrompeva prima di cominciare. Si attende l'evento, non un tempo.
+echo "→ Attendo che il file della prova venga aperto"
+for _ in $(seq 1 60); do
+    [ -n "$(file_prova)" ] && break
+    sleep 1
+done
+if [ -z "$(file_prova)" ]; then
+    echo "   ERRORE: metrics_node non ha aperto nessun file per questa prova." >&2
+    echo "   La missione e partita? ros2 topic echo /mission/stato" >&2
+    exit 1
+fi
 
 echo "→ Prova in corso per ${DURATA} s simulati"
 SIM0="$(ora_sim)"

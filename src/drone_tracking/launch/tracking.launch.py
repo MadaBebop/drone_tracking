@@ -15,6 +15,7 @@ lanciare i nodi da soli (prove di rete, ispezione dei topic) si passa
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -41,6 +42,21 @@ def generate_launch_description():
             'etichetta_config', default_value='',
             description='Etichetta aggiunta al nome del CSV di metrics_node, '
                         'per distinguere le configurazioni a confronto.'),
+        # L'attacco al GNSS resta spento per default: accendendolo in ogni
+        # prova non esisterebbe piu una linea di riferimento con cui
+        # confrontarlo.
+        DeclareLaunchArgument(
+            'gnss_denial', default_value='false',
+            description='Avvia gnss_denial_node, che attacca il ricevitore '
+                        'satellitare del drone nel simulatore.'),
+        DeclareLaunchArgument(
+            'gnss_modo', default_value='jamming',
+            description='jamming (fix intermittente), negazione (ricevitore '
+                        'spento) o spoofing (fix falsificato).'),
+        DeclareLaunchArgument(
+            'gnss_sempre_attivo', default_value='true',
+            description='true: attacco continuo per tutta la missione, come '
+                        'serve al confronto A/B. false: cicli alternati.'),
 
         Node(
             package='drone_tracking',
@@ -90,6 +106,18 @@ def generate_launch_description():
             name='metrics_node',
             output='screen',
             parameters=comune + [{'etichetta_config': etichetta}]
+        ),
+        Node(
+            package='drone_tracking',
+            executable='gnss_denial_node',
+            name='gnss_denial_node',
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('gnss_denial')),
+            parameters=comune + [{
+                'modo': LaunchConfiguration('gnss_modo'),
+                'sempre_attivo': ParameterValue(
+                    LaunchConfiguration('gnss_sempre_attivo'), value_type=bool),
+            }]
         ),
         # Ponte Gazebo -> ROS 2. `[` significa unidirezionale verso ROS: la
         # camera e il clock si leggono, non si scrivono.
