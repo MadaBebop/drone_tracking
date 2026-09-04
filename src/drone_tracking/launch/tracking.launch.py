@@ -45,6 +45,14 @@ def generate_launch_description():
         # L'attacco al GNSS resta spento per default: accendendolo in ogni
         # prova non esisterebbe piu una linea di riferimento con cui
         # confrontarlo.
+        # La sospensione cardanica esiste sempre nel modello: quando il
+        # nodo non gira, i giunti restano comandati a zero e la telecamera si
+        # comporta come se fosse fissa. Il confronto fra le due configurazioni
+        # avviene percio a parita di velivolo, masse e dinamica.
+        DeclareLaunchArgument(
+            'gimbal', default_value='true',
+            description='Stabilizza la telecamera comandando i due giunti '
+                        'della sospensione in senso opposto all assetto.'),
         DeclareLaunchArgument(
             'gnss_denial', default_value='false',
             description='Avvia gnss_denial_node, che attacca il ricevitore '
@@ -109,6 +117,14 @@ def generate_launch_description():
         ),
         Node(
             package='drone_tracking',
+            executable='gimbal_node',
+            name='gimbal_node',
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('gimbal')),
+            parameters=comune
+        ),
+        Node(
+            package='drone_tracking',
             executable='gnss_denial_node',
             name='gnss_denial_node',
             output='screen',
@@ -124,7 +140,12 @@ def generate_launch_description():
         ExecuteProcess(
             cmd=['ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
                  '/drone/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
-                 '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+                 '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
+                 # `]` e la direzione opposta: da ROS 2 a Gazebo. Sono comandi,
+                 # non misure, e un ponte bidirezionale rimanderebbe indietro
+                 # cio che ha appena scritto.
+                 '/gimbal/roll/cmd_pos@std_msgs/msg/Float64]gz.msgs.Double',
+                 '/gimbal/pitch/cmd_pos@std_msgs/msg/Float64]gz.msgs.Double'],
             output='screen'
         ),
     ])

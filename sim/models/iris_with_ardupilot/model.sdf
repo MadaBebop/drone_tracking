@@ -856,7 +856,88 @@
 
 
   
-    <!-- Telecamera frontale -->
+    <!-- Sospensione cardanica a due assi.
+         La telecamera era imbullonata al corpo: ogni rotazione del velivolo
+         traslava l'inquadratura indipendentemente da dove fosse il bersaglio,
+         e siccome un multirotore accelera inclinandosi, l'accoppiamento si
+         presentava proprio quando serviva inseguire. La compensazione
+         analitica in controller_node corregge l'errore di controllo ma non
+         l'osservazione: se l'inclinazione porta il bersaglio fuori dal campo
+         inquadrato, nessun calcolo lo recupera.
+         Qui i due giunti rotoidali disaccoppiano meccanicamente: rollio prima,
+         beccheggio poi, ciascuno comandato da gimbal_node in senso opposto
+         all'assetto misurato.
+         Gli assi sono dichiarati nel frame del MODELLO e non in quello del
+         giunto: la telecamera e ruotata di 90 gradi per guardare a nadir, e
+         senza questa precisazione gli assi erediterebbero quella rotazione,
+         scambiando rollio e beccheggio. -->
+    <link name="gimbal_roll_link">
+      <pose>0.1 0 -0.05 0 0 0</pose>
+      <inertial>
+        <!-- Massa piccola ma non trascurabile: due corpi quasi privi di massa
+             in serie, comandati da un regolatore, sono una sorgente classica
+             di instabilita numerica. Dieci grammi bastano a evitarla e non
+             alterano in modo apprezzabile la dinamica di un velivolo da 1,5 kg. -->
+        <mass>0.010</mass>
+        <inertia>
+          <ixx>0.00001</ixx><iyy>0.00001</iyy><izz>0.00001</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+    </link>
+
+    <joint name="gimbal_roll_joint" type="revolute">
+      <parent>iris_with_standoffs::base_link</parent>
+      <child>gimbal_roll_link</child>
+      <axis>
+        <xyz expressed_in="__model__">1 0 0</xyz>
+        <limit>
+          <!-- 45 gradi per asse: oltre, la sospensione entrerebbe nel campo
+               inquadrato e comparirebbe nell'immagine. Il limite e anche il
+               punto in cui la stabilizzazione satura e il residuo torna a
+               carico della compensazione analitica. -->
+          <lower>-0.7854</lower>
+          <upper>0.7854</upper>
+          <effort>2.0</effort>
+          <velocity>6.0</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.002</damping>
+          <friction>0.0</friction>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <link name="gimbal_pitch_link">
+      <pose>0.1 0 -0.05 0 0 0</pose>
+      <inertial>
+        <mass>0.010</mass>
+        <inertia>
+          <ixx>0.00001</ixx><iyy>0.00001</iyy><izz>0.00001</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+    </link>
+
+    <joint name="gimbal_pitch_joint" type="revolute">
+      <parent>gimbal_roll_link</parent>
+      <child>gimbal_pitch_link</child>
+      <axis>
+        <xyz expressed_in="__model__">0 1 0</xyz>
+        <limit>
+          <lower>-0.7854</lower>
+          <upper>0.7854</upper>
+          <effort>2.0</effort>
+          <velocity>6.0</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.002</damping>
+          <friction>0.0</friction>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <!-- Telecamera, appesa alla sospensione invece che al corpo -->
     <link name="camera_link">
       <inertial>
         <mass>0.001</mass>
@@ -913,9 +994,41 @@
     </link>
 
     <joint name="camera_joint" type="fixed">
-      <parent>iris_with_standoffs::base_link</parent>
+      <parent>gimbal_pitch_link</parent>
       <child>camera_link</child>
     </joint>
+
+    <!-- Comando in posizione dei due giunti. Si usa il regolatore standard di
+         gz-sim, che non richiede compilazione, invece del supporto nativo
+         AP_Mount di ArduPilot via canali servo: piu fedele, ma con incognite
+         sui parametri del SITL che questo progetto ha gia pagato care.
+         use_velocity_commands fa comandare al regolatore una velocita di
+         giunto invece di una coppia: con corpi cosi leggeri un anello in
+         coppia oscilla, mentre un servo reale e comunque rigido in
+         posizione. -->
+    <plugin filename="gz-sim-joint-position-controller-system"
+      name="gz::sim::systems::JointPositionController">
+      <joint_name>gimbal_roll_joint</joint_name>
+      <topic>/gimbal/roll/cmd_pos</topic>
+      <use_velocity_commands>true</use_velocity_commands>
+      <p_gain>8.0</p_gain>
+      <i_gain>0.0</i_gain>
+      <d_gain>0.0</d_gain>
+      <cmd_max>6.0</cmd_max>
+      <cmd_min>-6.0</cmd_min>
+    </plugin>
+
+    <plugin filename="gz-sim-joint-position-controller-system"
+      name="gz::sim::systems::JointPositionController">
+      <joint_name>gimbal_pitch_joint</joint_name>
+      <topic>/gimbal/pitch/cmd_pos</topic>
+      <use_velocity_commands>true</use_velocity_commands>
+      <p_gain>8.0</p_gain>
+      <i_gain>0.0</i_gain>
+      <d_gain>0.0</d_gain>
+      <cmd_max>6.0</cmd_max>
+      <cmd_min>-6.0</cmd_min>
+    </plugin>
 
 </model>
 </sdf>

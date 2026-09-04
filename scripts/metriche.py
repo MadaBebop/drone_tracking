@@ -108,6 +108,38 @@ def velocita(righe, col_x, col_y):
     return fuori
 
 
+def correlazione(righe, col_a, col_b):
+    """Coefficiente di Pearson fra due colonne, None se non calcolabile.
+
+    Serve a una domanda sola: quanto la posizione del bersaglio nell'immagine
+    dipende dall'assetto del velivolo invece che dal bersaglio. E la misura
+    dell'accoppiamento che la sospensione cardanica deve annullare, e senza di
+    essa l'effetto del gimbal si giudicherebbe a occhio.
+    """
+    coppie = []
+    for r in righe:
+        try:
+            a, b = r[col_a], r[col_b]
+            if a in ('', None) or b in ('', None):
+                continue
+            # I campioni senza bersaglio non dicono nulla sull'accoppiamento.
+            if float(r.get('det_valido', 1)) == 0:
+                continue
+            coppie.append((float(a), float(b)))
+        except (ValueError, KeyError, TypeError):
+            continue
+    if len(coppie) < 20:
+        return None
+    ma = mean(a for a, _ in coppie)
+    mb = mean(b for _, b in coppie)
+    num = sum((a - ma) * (b - mb) for a, b in coppie)
+    da = sum((a - ma) ** 2 for a, _ in coppie) ** 0.5
+    db = sum((b - mb) ** 2 for _, b in coppie) ** 0.5
+    if da == 0 or db == 0:
+        return None
+    return num / (da * db)
+
+
 def riassumi(percorso):
     righe = leggi(percorso)
     if not righe:
@@ -162,6 +194,22 @@ def riassumi(percorso):
                   '(max %.2f)' % (
                       etichetta, percentile(v, 0.95),
                       mean(in_moto) if in_moto else 0.0, max(v)))
+
+    # Accoppiamento assetto-immagine: e il difetto che la sospensione
+    # cardanica attacca alla radice, e si legge come correlazione.
+    for etichetta, assetto, immagine in (('pitch/det_y', 'pitch', 'det_y'),
+                                         ('roll/det_x', 'roll', 'det_x')):
+        r = correlazione(righe, assetto, immagine)
+        if r is not None:
+            print('  accoppiamento %-10s r = %+.3f' % (etichetta, r))
+
+    gr = numeri(righe, 'gimbal_roll')
+    if gr:
+        gp = numeri(righe, 'gimbal_pitch')
+        print('  comando gimbal         rollio |max| %.3f rad  '
+              'beccheggio |max| %.3f rad' % (
+                  max(abs(v) for v in gr),
+                  max(abs(v) for v in gp) if gp else float('nan')))
 
     ritmo = numeri(righe, 'det_hz')
     if ritmo:

@@ -28,7 +28,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point, PoseStamped
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float64, String
 
 # Stesso schema di accesso al simulatore usato da target_mover_node: i binding
 # nativi costano una frazione di millisecondo, il CLI centinaia. Se non sono
@@ -45,7 +45,8 @@ COLONNE = [
     't_sim', 't_wall', 'fase',
     'det_valido', 'det_x', 'det_y', 'det_area', 'det_hz',
     'trk_valido', 'trk_x', 'trk_y', 'trk_area', 'trk_hz',
-    'ekf_x', 'ekf_y', 'ekf_z',
+    'ekf_x', 'ekf_y', 'ekf_z', 'roll', 'pitch',
+    'gimbal_roll', 'gimbal_pitch',
     'gt_drone_x', 'gt_drone_y', 'gt_drone_z',
     'gt_target_x', 'gt_target_y', 'gt_target_z',
     'dist_xy_gt', 'dist_3d_gt', 'dist_xy_ekf',
@@ -84,6 +85,14 @@ class MetricsNode(Node):
         self.create_subscription(Point, '/target/position', self.on_detection, 10)
         self.create_subscription(Point, '/target/tracked_position', self.on_tracked, 10)
         self.create_subscription(Bool, '/gps/jammed', self.on_jam, 10)
+        # Comandi alla sospensione cardanica. Si registra il comando e non
+        # l'angolo effettivo del giunto perche e il comando a dire cosa il nodo
+        # ha chiesto: se il segno fosse sbagliato, si vedrebbe qui confrontato
+        # con la colonna dell'assetto.
+        self.create_subscription(Float64, '/gimbal/roll/cmd_pos',
+                                 self.on_gimbal_roll, 10)
+        self.create_subscription(Float64, '/gimbal/pitch/cmd_pos',
+                                 self.on_gimbal_pitch, 10)
         # Pubblicato da gnss_denial_node, che non esiste ancora: la colonna
         # resta a 0 finche non c'e. Sottoscriverlo da subito evita di dover
         # rifare i CSV di riferimento quando arrivera.
@@ -98,6 +107,12 @@ class MetricsNode(Node):
         self.trk = None
         self.jam = False
         self.gps_negato = False
+        # Assetto del corpo: e la grandezza che si accoppia all'inquadratura,
+        # quindi senza di essa l'effetto della stabilizzazione non si misura.
+        self.roll = None
+        self.pitch = None
+        self.gimbal_roll = None
+        self.gimbal_pitch = None
 
         # Contatori per il ritmo effettivo della catena di percezione, azzerati
         # a ogni riga: /target/position segue la telecamera, misurata fra 5 e
@@ -232,6 +247,16 @@ class MetricsNode(Node):
     def on_posa(self, msg: PoseStamped):
         p = msg.pose.position
         self.ekf = (p.x, p.y, p.z)
+        q = msg.pose.orientation
+        self.pitch = math.asin(max(-1.0, min(1.0, 2.0 * (q.w * q.y - q.z * q.x))))
+        self.roll = math.atan2(2.0 * (q.w * q.x + q.y * q.z),
+                               1.0 - 2.0 * (q.x * q.x + q.y * q.y))
+
+    def on_gimbal_roll(self, msg: Float64):
+        self.gimbal_roll = msg.data
+
+    def on_gimbal_pitch(self, msg: Float64):
+        self.gimbal_pitch = msg.data
 
     def on_detection(self, msg: Point):
         self.det = (msg.x, msg.y, msg.z)
@@ -301,6 +326,9 @@ class MetricsNode(Node):
         riga += [det_valido] + terna(self.det) + [round(self.n_det / dt, 1)]
         riga += [trk_valido] + terna(self.trk) + [round(self.n_trk / dt, 1)]
         riga += terna(self.ekf)
+        riga += [round(v, 4) if v is not None else ''
+                 for v in (self.roll, self.pitch,
+                           self.gimbal_roll, self.gimbal_pitch)]
         riga += terna(self.gt_drone)
         riga += terna(self.gt_bersaglio)
         riga += [dist_xy_gt, dist_3d_gt, dist_xy_ekf]

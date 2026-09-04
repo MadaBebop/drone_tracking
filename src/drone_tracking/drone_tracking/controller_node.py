@@ -32,6 +32,16 @@ class ControllerNode(Node):
         self.gps_sub = self.create_subscription(
             Bool, '/gps/jammed', self.on_gps_status, 10)
 
+        # Angoli comandati alla sospensione cardanica. Servono a sapere quanta
+        # parte dell'assetto e gia compensata meccanicamente: la compensazione
+        # analitica deve occuparsi solo del residuo. Se il gimbal non c'e,
+        # nessuno pubblica su questi topic, i valori restano zero e il calcolo
+        # torna identico a quello precedente.
+        self.create_subscription(
+            Float64, '/gimbal/roll/cmd_pos', self.on_gimbal_roll, 10)
+        self.create_subscription(
+            Float64, '/gimbal/pitch/cmd_pos', self.on_gimbal_pitch, 10)
+
         # Serve lo yaw per convertire i comandi dal frame del drone a quello del
         # mondo: vedi la nota in on_tracked.
         self.pose_sub = self.create_subscription(
@@ -51,6 +61,8 @@ class ControllerNode(Node):
         self.yaw            = 0.0
         self.pitch          = 0.0
         self.roll           = 0.0
+        self.gimbal_roll    = 0.0
+        self.gimbal_pitch   = 0.0
 
         # Compensazione d'assetto. La telecamera è solidale al corpo: una
         # rotazione del velivolo trasla l'immagine indipendentemente da dove si
@@ -247,6 +259,12 @@ class ControllerNode(Node):
         self.roll = math.atan2(2.0 * (q.w * q.x + q.y * q.z),
                                1.0 - 2.0 * (q.x * q.x + q.y * q.y))
 
+    def on_gimbal_roll(self, msg: Float64):
+        self.gimbal_roll = msg.data
+
+    def on_gimbal_pitch(self, msg: Float64):
+        self.gimbal_pitch = msg.data
+
     def on_gps_status(self, msg: Bool):
         if msg.data and not self.gps_jammed:
             self.get_logger().warn('GPS perso — modalità visione attiva')
@@ -288,8 +306,16 @@ class ControllerNode(Node):
         # veniva sottratto) e tan(0.6435) = 0.750 e non 0.6435 in verticale
         # (16%). Si converte la misura in angolo, si toglie l'assetto, si torna
         # in coordinate normalizzate.
-        alpha_x = math.atan(msg.x * self.tan_semi_fov_o) - self.roll
-        alpha_y = math.atan(msg.y * self.tan_semi_fov_v) + self.pitch
+        # Assetto della TELECAMERA, non del corpo: quello che trasla
+        # l'inquadratura e l'inclinazione dell'asse ottico, che vale assetto
+        # del corpo piu angolo del giunto. Sottrarre l'assetto del corpo
+        # quando il gimbal lo ha gia annullato introduce un errore fantasma
+        # invece di rimuoverne uno: misurato come distanza mediana da 3.7 a
+        # 10.5 m e un ingresso in RICERCA che senza gimbal non avveniva.
+        roll_camera = self.roll + self.gimbal_roll
+        pitch_camera = self.pitch + self.gimbal_pitch
+        alpha_x = math.atan(msg.x * self.tan_semi_fov_o) - roll_camera
+        alpha_y = math.atan(msg.y * self.tan_semi_fov_v) + pitch_camera
         # Il clamp a 80° evita che la tangente esploda in un transitorio
         # anomalo: con la guardia FOV a 1.2 e l'assetto limitato a 25° da
         # ATC_ANGLE_MAX non ci si arriva, e il comando risultante verrebbe

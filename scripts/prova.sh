@@ -88,27 +88,53 @@ ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true" >/dev/null
 # prova dopo pochi secondi. Il CSV riporta lo stesso orologio — i nodi girano
 # con use_sim_time — senza intermediari e senza costo.
 ora_sim() {
+    local f valore
+    f="$(file_prova)"
+    [ -z "$f" ] && return
+    valore="$(tail -1 "$f" | cut -d, -f1 | cut -d. -f1)"
+    # Un file appena aperto contiene solo l'intestazione, e "t_sim" non e un
+    # numero: senza questo controllo la prova si interrompeva subito.
+    [ "$valore" = "t_sim" ] && return
+    echo "$valore"
+}
+
+# Il file e utilizzabile solo quando contiene almeno un campione, non appena
+# esiste: fra l'apertura e la prima riga passa un periodo del timer di
+# metrics_node.
+file_pronto() {
     local f
     f="$(file_prova)"
-    if [ -n "$f" ]; then
-        tail -1 "$f" | cut -d, -f1 | cut -d. -f1
-    fi
+    [ -n "$f" ] && [ "$(wc -l < "$f")" -ge 2 ]
 }
 
 # metrics_node apre il file della prova quando la missione lascia ATTESA, cosa
 # che avviene al ciclo successivo del suo timer: mezzo secondo SIMULATO, che a
 # 0.25x sono due secondi di orologio. Una pausa fissa qui era troppo corta e la
 # prova si interrompeva prima di cominciare. Si attende l'evento, non un tempo.
-echo "→ Attendo che il file della prova venga aperto"
-for _ in $(seq 1 60); do
-    [ -n "$(file_prova)" ] && break
+echo "→ Attendo il primo campione della prova"
+for _ in $(seq 1 90); do
+    file_pronto && break
     sleep 1
 done
-if [ -z "$(file_prova)" ]; then
-    echo "   ERRORE: metrics_node non ha aperto nessun file per questa prova." >&2
+if ! file_pronto; then
+    echo "   ERRORE: metrics_node non ha scritto nessun campione per questa prova." >&2
     echo "   La missione e partita? ros2 topic echo /mission/stato" >&2
     exit 1
 fi
+
+# La distanza si cerca per NOME della colonna, non per posizione: aggiungere
+# una colonna a metrics_node aveva spostato l'indice e il cruscotto mostrava
+# un'altra grandezza senza che nulla lo segnalasse.
+distanza_corrente() {
+    local f
+    f="$(file_prova)"
+    [ -z "$f" ] && return
+    local c
+    c="$(head -1 "$f" | tr ',' '
+' | grep -n '^dist_xy_gt$' | cut -d: -f1)"
+    [ -z "$c" ] && return
+    tail -1 "$f" | awk -F, -v c="$c" '{print $c}'
+}
 
 echo "→ Prova in corso per ${DURATA} s simulati"
 SIM0="$(ora_sim)"
@@ -138,8 +164,7 @@ while true; do
         TRASCORSO="$(( SIM - SIM0 ))"
         FASE="$(ros2 topic echo /mission/stato --field data --once 2>/dev/null \
                 | grep -m1 -oE '(ATTESA|PATTUGLIAMENTO[^ ]*|AGGANCIO|RICERCA)' || echo '?')"
-        # La distanza dal bersaglio e la quinta colonna da destra del CSV.
-        DIST="$(tail -1 "$(file_prova)" | awk -F, '{print $23}')"
+        DIST="$(distanza_corrente)"
         echo "  ${TRASCORSO}s sim (${ORLOGIO}s reali)  fase=${FASE}  distanza=${DIST:-?} m"
         [ "$TRASCORSO" -ge "$DURATA" ] && break
     fi

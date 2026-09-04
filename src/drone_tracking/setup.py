@@ -36,6 +36,7 @@ setup(
             'target_mover_node = drone_tracking.target_mover_node:main',
             'metrics_node = drone_tracking.metrics_node:main',
             'gnss_denial_node = drone_tracking.gnss_denial_node:main',
+            'gimbal_node = drone_tracking.gimbal_node:main',
         ],
     },
 )

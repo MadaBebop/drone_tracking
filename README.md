@@ -683,6 +683,142 @@ del progetto assume nullo.
 Alla chiusura il nodo stampa un riepilogo (campioni, percentuale di fotogrammi
 con bersaglio, distanza media, tempo per fase).
 
+### gimbal_node
+
+Stabilizza la telecamera comandando i due giunti della sospensione cardanica in
+senso opposto all'assetto misurato. Il difetto che affronta è geometrico e non
+di taratura: la telecamera era imbullonata al corpo, e un multirotore accelera
+inclinandosi, quindi ogni comando di inseguimento produceva una rotazione che
+traslava l'inquadratura indipendentemente da dove fosse il bersaglio. Più il
+controllo era pronto, più il velivolo si inclinava, e prima il bersaglio usciva
+dal campo — le due grandezze non si potevano ottimizzare separatamente.
+
+La compensazione analitica in `controller_node` **resta al suo posto**: corregge
+l'errore di controllo, non l'osservazione. Se l'inclinazione porta il bersaglio
+fuori dai pixel, nessun calcolo lo recupera; e quando il giunto satura ai 45°
+del proprio limite, il residuo torna a suo carico.
+
+| Parametro | Default | Significato |
+|---|---|---|
+| `abilitato` | `true` | a `false` comanda zero: la telecamera si comporta come fissa |
+| `guadagno` | 1.0 | frazione dell'assetto compensata, per misurare quanto conta |
+| `limite_rad` | 0.7854 | limite meccanico del giunto, 45° |
+| `timeout_posa_s` | 1.0 | oltre, il comando resta all'ultimo valore e l'anomalia è segnalata |
+
+Due dettagli non ovvi del modello. Gli assi dei giunti sono dichiarati nel frame
+del **modello** (`expressed_in="__model__"`) e non in quello del giunto: la
+telecamera è ruotata di 90° per guardare a nadir, e senza quella precisazione
+gli assi erediterebbero la rotazione, scambiando rollio e beccheggio. I link
+della sospensione hanno massa 10 g e non zero: due corpi quasi privi di massa in
+serie, comandati da un regolatore, sono una sorgente classica di instabilità
+numerica.
+
+Il regolatore è `gz-sim-joint-position-controller-system`, con
+`use_velocity_commands` attivo: con corpi così leggeri un anello in coppia
+oscilla, mentre un servo reale è comunque rigido in posizione. Verificato sul
+banco a terra — comandati +0.30 e −0.20 rad, i giunti raggiungono esattamente
++0.30 e −0.20, sia dal lato Gazebo sia attraverso il ponte da ROS 2.
+
+La configurazione di riferimento si ottiene con `gimbal:=false`, che lascia i
+giunti fermi a zero: il confronto avviene così a parità di velivolo, di masse e
+di dinamica, invece di confrontare due modelli diversi.
+
+```bash
+docker compose exec -e LAUNCH_ARGS="gimbal:=false" sim start_all.sh --detach
+```
+
+**Il gimbal da solo peggiora le cose.** È il risultato più istruttivo di questa
+fase e vale la pena riportarlo. Attivando la sospensione senza toccare nient'
+altro, l'accoppiamento crolla come previsto ma l'inseguimento degrada: bersaglio
+rilevato dall'82.9% al 54.2%, distanza mediana da 3.70 a 10.54 m, e per la prima
+volta la missione cade in `RICERCA`.
+
+La causa è che due correzioni agivano sullo stesso effetto. Il gimbal stabilizza
+l'immagine, e `controller_node` continuava a sottrarre l'assetto del **corpo**
+da un'immagine in cui quell'assetto non compariva più: un errore fantasma
+proporzionale all'inclinazione, cioè lo stesso difetto che la compensazione
+doveva eliminare, col segno rovesciato. La grandezza corretta è l'assetto della
+**telecamera**, che vale assetto del corpo più angolo del giunto — per questo il
+controller si iscrive ai due topic di comando del gimbal. Senza gimbal l'angolo
+è zero e la formula torna quella precedente; con il giunto in saturazione resta
+il residuo, che è esattamente ciò che va ancora compensato.
+
+Misure su fuga a 4 m/s, cinquanta secondi simulati per configurazione:
+
+| | Telecamera fissa | Gimbal, doppia compensazione | Gimbal + residuo |
+|---|---|---|---|
+| Accoppiamento `pitch`/`det_y` | −0.858 | −0.317 | −0.222 |
+| Accoppiamento `roll`/`det_x` | +0.702 | +0.199 | +0.217 |
+| Bersaglio rilevato | 82.9% | 54.2% | 84.0% |
+| Fornito dal filtro | 82.9% | 66.7% | 84.7% |
+| Distanza mediana | 3.70 m | 10.54 m | 3.88 m |
+| Durata aggancio | 42.0 s | 49.0 s + 9 s di ricerca | 45.8 s |
+
+L'assetto spiegava il 74% della varianza della posizione del bersaglio
+nell'immagine (r² = 0.74); con la sospensione ne spiega il 5%. A questa velocità
+di fuga, però, le metriche di inseguimento **pareggiano** il riferimento invece
+di migliorarlo: il vincolo dominante qui non è l'accoppiamento — il riferimento
+teneva l'aggancio per tutta la prova — ma l'errore a regime del controllo
+proporzionale descritto sopra.
+
+La prova è stata ripetuta a 5.5 m/s, oltre il limite di velocità del velivolo,
+dove il riferimento è in difficoltà:
+
+| | Telecamera fissa | Gimbal + residuo |
+|---|---|---|
+| Accoppiamento `pitch`/`det_y` | −0.869 | −0.241 |
+| Accoppiamento `roll`/`det_x` | +0.544 | +0.129 |
+| Bersaglio rilevato | 73.2% | 74.3% |
+| Fornito dal filtro | 81.3% | 83.0% |
+| Distanza mediana | 3.86 m | 3.66 m |
+| Durata aggancio | 41.8 s | 43.8 s |
+
+Di nuovo l'accoppiamento scompare (r² da 0.76 a 0.06) e di nuovo le metriche di
+inseguimento si muovono appena. La spiegazione sta nei numeri stessi: con una
+distanza mediana di 3.9 m e un semicampo che a 12 m di quota copre 12 m al
+suolo, la traslazione da assetto — 5.6 m equivalenti a 25° di inclinazione —
+porta il bersaglio a circa 9.5 m, ancora dentro l'inquadratura. Finché il
+bersaglio resta inquadrato comunque, eliminare l'accoppiamento non aggiunge
+fotogrammi.
+
+**Il valore della sospensione si vede alzando il guadagno.** Il progetto
+sosteneva che aggressività e osservabilità non si possono ottimizzare
+separatamente: più il controllo è pronto, più il velivolo si inclina, e prima il
+bersaglio esce dall'inquadratura. Se la sospensione disaccoppia davvero le due
+cose, quel prezzo deve smettere di esistere. La prova, con `kp_x` e `kp_y`
+portati da 1.2 a 2.0 e fuga a 5.5 m/s:
+
+| | Telecamera fissa | Gimbal |
+|---|---|---|
+| Sequenza delle fasi | `PATT → AGG → RICERCA → AGG` | `PATT → AGG` |
+| Bersaglio rilevato | 53.1% | 80.6% |
+| Fornito dal filtro | 64.8% | 82.8% |
+| Distanza mediana | 8.58 m | 4.12 m |
+| Agganci | 2 (26.4 e 12.8 s), perso una volta | 1 (44.4 s), mai perso |
+| Accoppiamento `pitch`/`det_y` | −0.786 | −0.371 |
+
+Confrontate con il guadagno nominale alla stessa velocità: senza sospensione
+l'aumento fa **crollare** il rilevamento dal 73.2% al 53.1% e fa perdere
+l'aggancio; con la sospensione lo fa **salire** dal 74.3% all'80.6% e l'aggancio
+tiene per l'intera prova. È la dimostrazione diretta dell'affermazione
+architetturale: il conflitto fra guadagno e campo visivo esiste solo con la
+telecamera solidale al corpo.
+
+**Cosa vale allora la sospensione.** Rende l'immagine una misura del bersaglio
+invece che dell'assetto del velivolo — dimostrato — e con questo rimuove il
+vincolo che teneva bassi i guadagni. Al guadagno nominale non paga nulla, e
+anche questo va detto: il vincolo dominante a 1.2 non era l'accoppiamento. Paga
+quando si sfrutta il margine che apre.
+
+I default nel codice restano `kp = 1.2`, che è il valore sicuro **in entrambe le
+configurazioni**: con `gimbal:=false` e `kp = 2.0` il sistema è peggiore di
+quello attuale. Chi gira con la sospensione attiva può alzarlo senza
+ricompilare:
+
+```bash
+ros2 param set /controller_node kp_x 2.0 && ros2 param set /controller_node kp_y 2.0
+```
+
 ### gnss_denial_node
 
 Attacca il ricevitore satellitare **del drone**, iniettando il disturbo nei

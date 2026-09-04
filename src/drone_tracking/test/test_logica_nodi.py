@@ -20,6 +20,7 @@ from geometry_msgs.msg import Point, PoseStamped
 from std_msgs.msg import Float64, String
 
 from drone_tracking.controller_node import ControllerNode
+from drone_tracking.gimbal_node import GimbalNode
 from drone_tracking.gnss_denial_node import MODI, GnssDenialNode
 from drone_tracking.mission_node import FaseMissione, MissionNode
 from drone_tracking.tracker_node import TrackerNode
@@ -59,6 +60,40 @@ def test_compensazione_dassetto_lavora_sugli_angoli():
         nodo.on_tracked(Point(x=u, y=0.0, z=300.0))
         assert abs(nodo.cmd_corrente.linear.x) < 1e-6
         assert abs(nodo.cmd_corrente.linear.y) < 1e-6
+    finally:
+        nodo.destroy_node()
+
+
+def test_compensazione_tiene_conto_del_gimbal():
+    """Con il gimbal attivo l'assetto e gia compensato: non va sottratto due volte.
+
+    E il difetto che ha fatto peggiorare l'inseguimento quando la sospensione
+    cardanica e stata introdotta: due correzioni sullo stesso effetto, di cui
+    la seconda con il segno rovesciato.
+    """
+    nodo = controller_in_aggancio()
+    try:
+        u = 0.25
+        # Il corpo e inclinato, ma il giunto compensa esattamente: la
+        # telecamera guarda dove guardava, quindi l'immagine dice il vero e
+        # non va corretta. Un bersaglio al centro deve dare errore nullo.
+        nodo.roll = 0.30
+        nodo.gimbal_roll = -0.30
+        nodo.pitch = 0.0
+        nodo.gimbal_pitch = 0.0
+        nodo.on_tracked(Point(x=0.0, y=0.0, z=300.0))
+        assert abs(nodo.cmd_corrente.linear.y) < 1e-6
+        assert abs(nodo.cmd_corrente.linear.x) < 1e-6
+
+        # Gimbal in saturazione: resta un residuo, e quello va compensato.
+        nodo.primo_aggancio = True
+        nodo.roll = 0.60
+        nodo.gimbal_roll = -0.45
+        residuo = 0.15
+        nodo.on_tracked(Point(x=math.tan(residuo) / nodo.tan_semi_fov_o,
+                              y=0.0, z=300.0))
+        assert abs(nodo.cmd_corrente.linear.y) < 1e-6, (
+            'il residuo di saturazione deve essere ancora compensato')
     finally:
         nodo.destroy_node()
 
@@ -197,6 +232,95 @@ def test_predizione_estrapola_durante_la_perdita():
         nodo.on_detection(Point(x=0.0, y=0.0, z=0.0))   # segnale assente
         dopo = float(nodo.stato_stimato[0].item())
         assert dopo > prima, 'la predizione deve avanzare, non restare ferma'
+    finally:
+        nodo.destroy_node()
+
+
+class Raccoglitore:
+    """Publisher finto: raccoglie i messaggi invece di spedirli.
+
+    Serve perche il comando al gimbal e un'uscita, e un'uscita si verifica
+    leggendola: senza questo si potrebbe solo controllare che il nodo non
+    sollevi eccezioni, che non e la stessa cosa.
+    """
+
+    def __init__(self):
+        self.messaggi = []
+
+    def publish(self, msg):
+        self.messaggi.append(msg)
+
+
+def gimbal_con_raccoglitori():
+    nodo = GimbalNode()
+    nodo.pub_roll = Raccoglitore()
+    nodo.pub_pitch = Raccoglitore()
+    return nodo
+
+
+def test_gimbal_comanda_l_opposto_dell_assetto():
+    """La rotazione del giunto deve annullare quella del corpo.
+
+    Se il segno fosse invertito l'accoppiamento fra assetto e inquadratura
+    raddoppierebbe invece di annullarsi, ed e un errore che in volo si vede
+    solo come "il gimbal peggiora le cose".
+    """
+    nodo = gimbal_con_raccoglitori()
+    try:
+        nodo.roll = 0.20
+        nodo.pitch = -0.15
+        nodo.istante_posa = ora(nodo)
+        nodo.comanda()
+        assert abs(nodo.pub_roll.messaggi[-1].data + 0.20) < 1e-9
+        assert abs(nodo.pub_pitch.messaggi[-1].data - 0.15) < 1e-9
+    finally:
+        nodo.destroy_node()
+
+
+def test_gimbal_satura_al_limite_del_giunto():
+    nodo = gimbal_con_raccoglitori()
+    try:
+        nodo.roll = 1.4          # ben oltre i 45 gradi del giunto
+        nodo.pitch = -1.4
+        nodo.istante_posa = ora(nodo)
+        nodo.comanda()
+        assert abs(nodo.pub_roll.messaggi[-1].data + nodo.limite_rad) < 1e-9
+        assert abs(nodo.pub_pitch.messaggi[-1].data - nodo.limite_rad) < 1e-9
+    finally:
+        nodo.destroy_node()
+
+
+def test_gimbal_disabilitato_comanda_zero():
+    """Con la stabilizzazione spenta i giunti vanno tenuti a zero.
+
+    E il modo in cui si ottiene la configurazione di riferimento: stesso
+    velivolo, stesse masse, telecamera che si comporta come se fosse fissa.
+    """
+    from rclpy.parameter import Parameter
+
+    nodo = gimbal_con_raccoglitori()
+    try:
+        nodo.set_parameters([Parameter('abilitato', Parameter.Type.BOOL, False)])
+        nodo.roll = 0.3
+        nodo.istante_posa = ora(nodo)
+        nodo.comanda()
+        assert nodo.pub_roll.messaggi[-1].data == 0.0
+        assert nodo.pub_pitch.messaggi[-1].data == 0.0
+    finally:
+        nodo.destroy_node()
+
+
+def test_gimbal_senza_posa_non_comanda():
+    nodo = gimbal_con_raccoglitori()
+    try:
+        nodo.istante_posa = None
+        nodo.comanda()
+        assert nodo.pub_roll.messaggi == []
+
+        # Posa vecchia di cinque secondi: vale come assente.
+        nodo.istante_posa = ora(nodo) - 5.0
+        nodo.comanda()
+        assert nodo.pub_roll.messaggi == []
     finally:
         nodo.destroy_node()
 
