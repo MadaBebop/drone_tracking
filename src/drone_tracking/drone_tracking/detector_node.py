@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from drone_tracking.mission_node import FaseMissione  # type: ignore
+from drone_tracking.parametri import parametro  # type: ignore
 
 class DetectorNode(Node):
     def __init__(self):
@@ -29,6 +30,19 @@ class DetectorNode(Node):
         self.mission_sub = self.create_subscription(
             String, '/mission/stato',
             self.on_stato_missione, 10)
+
+        # Soglia di validità del contorno, in pixel quadrati. Abbassata da 200
+        # a 100 quando il FOV e passato a 90 gradi: la sfera occupa circa un
+        # terzo dei pixel di prima a parita di quota.
+        self.area_minima_px = parametro(self, 'area_minima_px', 100.0)
+
+        # Estremi della maschera HSV per il rosso. La tinta del rosso sta a
+        # cavallo dello zero, quindi servono due intervalli: [0, tolleranza] e
+        # [180-tolleranza, 180]. Saturazione e valore minimi escludono i grigi e
+        # le zone in ombra, che altrimenti rientrerebbero nella tinta giusta.
+        self.tolleranza_tinta   = parametro(self, 'tolleranza_tinta', 10)
+        self.saturazione_minima = parametro(self, 'saturazione_minima', 120)
+        self.valore_minimo      = parametro(self, 'valore_minimo', 70)
 
         self.pos_smooth_x = 0.0
         self.pos_smooth_y = 0.0
@@ -56,10 +70,14 @@ class DetectorNode(Node):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
         # Rilevamento colore rosso in HSV
-        hsv   = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask1 = cv2.inRange(hsv, np.array([0, 120, 70]),   np.array([10, 255, 255]))
-        mask2 = cv2.inRange(hsv, np.array([170, 120, 70]), np.array([180, 255, 255]))
-        mask  = mask1 | mask2
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        t, s_min, v_min = (self.tolleranza_tinta, self.saturazione_minima,
+                           self.valore_minimo)
+        mask1 = cv2.inRange(hsv, np.array([0, s_min, v_min]),
+                            np.array([t, 255, 255]))
+        mask2 = cv2.inRange(hsv, np.array([180 - t, s_min, v_min]),
+                            np.array([180, 255, 255]))
+        mask = mask1 | mask2
 
         # Estrazione dei contorni del target
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -69,10 +87,8 @@ class DetectorNode(Node):
             c = max(contours, key=cv2.contourArea)
             area_corrente = cv2.contourArea(c)
             
-            # Soglia di validità del contorno (evita il rumore visivo)
-            # Soglia abbassata da 200 a 100 px^2: con il FOV allargato a 90° la
-            # sfera occupa circa un terzo dei pixel di prima a parita di quota.
-            if area_corrente > 100:
+            # Sotto la soglia si tratta di rumore visivo, non del bersaglio.
+            if area_corrente > self.area_minima_px:
                 M = cv2.moments(c)
                 
                 # Protezione da divisione per zero (può capitare se l'area del momento M['m00'] è nulla)

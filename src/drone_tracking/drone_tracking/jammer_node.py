@@ -6,6 +6,8 @@ from std_msgs.msg import Bool, Float32
 from geometry_msgs.msg import Point
 import numpy as np
 
+from drone_tracking.parametri import parametro  # type: ignore
+
 class JammerNode(Node):
     def __init__(self):
         super().__init__('jammer_node')
@@ -29,18 +31,38 @@ class JammerNode(Node):
         # Stato interno
         self.jamming_active = False
         self.jam_cycle = 0
-        self.jam_on_duration  = 40   # cicli con jamming attivo  (~4 sec)
-        self.jam_off_duration = 100   # cicli con jamming inattivo (~10 sec)
+        self.jam_on_duration = parametro(
+            self, 'jam_on_duration', 40)     # cicli attivi   (~4 s)
+        self.jam_off_duration = parametro(
+            self, 'jam_off_duration', 100)   # cicli inattivi (~10 s)
 
         self.ultimo_publish = 0.0
         self.throttle_hz = 0.05  # pubblica max ogni 50ms (per problema di sovraccarico del tracker)
-    
+
+        # 30% di probabilità di perdita totale del rilevamento per messaggio
+        self.probabilita_perdita_segnale = parametro(
+            self, 'probabilita_perdita_segnale', 0.3)
+        # deviazione standard del rumore gaussiano, in coordinate normalizzate
+        self.deviazione_rumore = parametro(self, 'deviazione_rumore', 0.3)
+
+        # Seme del generatore pseudocasuale. Senza, ogni esecuzione vedeva una
+        # sequenza di disturbo diversa: due prove della stessa configurazione
+        # davano risultati che non si potevano confrontare, perché a cambiare
+        # non era solo il codice ma anche lo stimolo. Fissandolo, il disturbo
+        # diventa parte riproducibile dell'esperimento; per esplorare piu
+        # sequenze si passa un valore diverso dalla riga di comando:
+        #   ros2 run drone_tracking jammer_node --ros-args -p seed:=7
+        # Un valore negativo torna al comportamento non deterministico.
+        self.seed = int(parametro(self, 'seed', 42))   # cambiarlo a caldo non ha senso
+        if self.seed >= 0:
+            np.random.seed(self.seed)
+            self.get_logger().info(f'Sequenza di disturbo deterministica — seed={self.seed}')
+        else:
+            self.get_logger().warn('seed negativo — disturbo non riproducibile fra run')
+
         # Timer principale — cicla jamming ON/OFF
         self.timer = self.create_timer(0.1, self.update)
         self.get_logger().info('JammerNode avviato — ciclo jamming ON/OFF automatico')
-        
-        self.probabilita_perdita_segnale = 0.3 # 30% di probabilità di perdita totale
-        self.deviazione_rumore = 0.3 # deviazione standard rumore gaussiano
 
     def update(self):
         self.jam_cycle += 1

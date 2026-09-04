@@ -5,6 +5,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point
 from std_msgs.msg import Bool, String, Float32
 from drone_tracking.mission_node import FaseMissione  # type: ignore
+from drone_tracking.parametri import parametro  # type: ignore
 import numpy as np
 
 class TrackerNode(Node):
@@ -53,9 +54,32 @@ class TrackerNode(Node):
 
         self.livello_rumore = 0.0
         
-        # Alta incertezza sulla velocità — ci fidiamo poco della predizione
-        self.incertezza_modello = np.diag([0.01, 0.01, 0.5, 0.5]).astype(np.float32)
-        self.incertezza_sensore = np.eye(2, dtype=np.float32) * 0.05
+        # Intensita del rumore di accelerazione del modello, in (unita
+        # normalizzate)^2/s^3. Non e piu una matrice costante: la matrice Q
+        # viene ricostruita a ogni predizione in funzione del dt effettivo, con
+        # la discretizzazione standard di un modello a velocita quasi costante
+        # (vedi _matrice_Q). Prima veniva sommata sempre la stessa Q qualunque
+        # fosse il tempo trascorso: al ritmo variabile della telecamera
+        # (misurato fra 5 e 13 Hz) lo stesso intervallo veniva penalizzato o
+        # premiato a caso, e i termini incrociati posizione-velocita, che in
+        # questo modello esistono, mancavano del tutto.
+        #
+        # Il valore e scelto per riprodurre al dt nominale di 0.1 s il termine
+        # di velocita della vecchia matrice (0.5 = q*dt con q = 5.0), cosi il
+        # confronto con le prove precedenti resta leggibile. Il termine di
+        # posizione risulta invece piu piccolo di quanto fosse (q*dt^3/3 =
+        # 0.0017 contro 0.01), che e corretto: la posizione non e affetta da
+        # rumore proprio, eredita solo quello dell'accelerazione integrata due
+        # volte.
+        self.intensita_rumore_accel = parametro(
+            self, 'intensita_rumore_accel', 5.0)
+        # Incertezza della misura, che cresce con il rumore dichiarato sul
+        # datalink: e il meccanismo con cui il filtro si fida meno del
+        # rilevamento durante il jamming (vedi on_noise_level).
+        self.rumore_sensore_base = parametro(self, 'rumore_sensore_base', 0.05)
+        self.rumore_sensore_max  = parametro(self, 'rumore_sensore_max', 2.0)
+        self.incertezza_sensore = (np.eye(2, dtype=np.float32)
+                                   * self.rumore_sensore_base)
         self.incertezza_corrente = np.eye(4, dtype=np.float32)
 
         self.bersaglio_acquisito = False
@@ -67,7 +91,7 @@ class TrackerNode(Node):
         # difficili, come una fuga nella direzione opposta a quella in cui il
         # drone si sta muovendo, dove il bersaglio esce dall'inquadratura per
         # qualche decimo di secondo mentre il velivolo inverte la marcia.
-        self.soglia_perdita = 15
+        self.soglia_perdita = parametro(self, 'soglia_perdita', 15)
 
         # Ultima area valida del contorno. Serve a marcare come utilizzabili le
         # posizioni predette durante una perdita di segnale: `z` è il flag di
@@ -76,6 +100,26 @@ class TrackerNode(Node):
         self.ultima_area = 0.0
 
         self.get_logger().info('TrackerNode avviato — filtro Kalman attivo')
+
+    def _matrice_Q(self, dt):
+        """Rumore di processo per un modello a velocita quasi costante.
+
+        Un'accelerazione ignota di intensita q, integrata su un intervallo dt,
+        produce sulla posizione una varianza q*dt^3/3, sulla velocita q*dt e fra
+        le due una covarianza q*dt^2/2. Lo stato e [x, y, vx, vy], quindi i due
+        assi occupano righe alternate e i termini incrociati stanno fuori dalla
+        diagonale.
+        """
+        q = self.intensita_rumore_accel
+        p = q * dt ** 3 / 3.0    # posizione
+        c = q * dt ** 2 / 2.0    # posizione-velocita
+        v = q * dt               # velocita
+        return np.array([
+            [p, 0, c, 0],
+            [0, p, 0, c],
+            [c, 0, v, 0],
+            [0, c, 0, v],
+        ], dtype=np.float32)
 
     def _calcola_dt(self):
         """Intervallo reale trascorso dall'ultima misura, con clamp di sicurezza."""
@@ -89,9 +133,9 @@ class TrackerNode(Node):
 
     def on_noise_level(self, msg: Float32):
         self.livello_rumore = msg.data
-        r_base = 0.05
-        r_max  = 2.0
-        r_dinamico = r_base + (r_max - r_base) * self.livello_rumore
+        r_dinamico = (self.rumore_sensore_base
+                      + (self.rumore_sensore_max - self.rumore_sensore_base)
+                      * self.livello_rumore)
         self.incertezza_sensore = np.eye(2, dtype=np.float32) * r_dinamico
         # self.get_logger().info(f'R adattivo: {r_dinamico:.3f} (rumore RF: {self.livello_rumore:.1f})')
         
@@ -144,7 +188,7 @@ class TrackerNode(Node):
         self.stato_stimato = self.evoluzione_stato @ self.stato_stimato
         self.incertezza_corrente = (
             self.evoluzione_stato @ self.incertezza_corrente
-            @ self.evoluzione_stato.T + self.incertezza_modello
+            @ self.evoluzione_stato.T + self._matrice_Q(dt)
         )
 
         if segnale_presente:
@@ -165,9 +209,21 @@ class TrackerNode(Node):
                 @ self.incertezza_corrente
             )
 
-            # Smorza la velocità stimata per ridurre predizioni errate
-            self.stato_stimato[2] *= 0.6
-            self.stato_stimato[3] *= 0.6
+            # Qui la velocità stimata veniva moltiplicata per 0.6 a ogni
+            # aggiornamento, per "ridurre predizioni errate". Rimosso: era uno
+            # smorzamento applicato allo stato senza toccare la covarianza
+            # corrispondente, cioè il filtro dichiarava una fiducia che non
+            # corrispondeva più alla stima, e la coerenza fra le due è l'unica
+            # cosa che rende ottimo un filtro di Kalman. Peggio, essendo
+            # applicato a ogni misura, il fattore si componeva: dopo dieci
+            # aggiornamenti la velocità era ridotta a 0.6^10, cioè lo 0.6% del
+            # valore stimato, e la predizione durante una perdita di segnale
+            # restava praticamente ferma sull'ultima posizione invece di
+            # estrapolare il moto del bersaglio.
+            # Lo stesso effetto — stima di velocità meno nervosa — si ottiene
+            # ora per la via corretta, cioè dall'intensità di rumore del modello
+            # in _matrice_Q, che governa quanto la velocità può cambiare fra due
+            # misure e aggiorna di conseguenza anche l'incertezza.
 
             self.ultima_area = msg.z
 

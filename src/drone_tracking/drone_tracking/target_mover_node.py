@@ -9,6 +9,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 import subprocess
 import math
 from drone_tracking.mission_node import FaseMissione  # type: ignore
+from drone_tracking.parametri import parametro  # type: ignore
 
 # I binding Python di gz-transport riusano un nodo persistente: una richiesta
 # costa ~0.4 ms, contro i ~360 ms del comando `gz service`, che a 10 Hz non
@@ -59,7 +60,7 @@ class TargetMoverNode(Node):
         # 25 secondi invece dei 5 dichiarati. Ora si misura il tempo reale, così
         # il valore non dipende dalla frequenza del topic.
         self.istante_aggancio  = None
-        self.ritardo_evasione_s = 10.0
+        self.ritardo_evasione_s = parametro(self, 'ritardo_evasione_s', 10.0)
 
         # I parametri di moto sono espressi in unità AL SECONDO e integrati sul
         # dt reale. Prima erano incrementi per tick, con il timer dichiarato a
@@ -68,12 +69,19 @@ class TargetMoverNode(Node):
         # velocità effettivamente osservata con quel timer strozzato.
         self.centro_x = 20.0
         self.centro_y = 20.0
-        self.raggio   = 3.0
+        # Il centro si sposta dopo ogni evasione: quello iniziale va conservato
+        # per poter riportare il bersaglio al punto di partenza.
+        self.centro_iniziale = (self.centro_x, self.centro_y)
+        # Si assume ATTESA fino a prova contraria: serve a riconoscere il
+        # passaggio ATTESA -> missione avviata, non lo stato in se.
+        self.missione_in_attesa = True
+        self.raggio   = parametro(self, 'raggio_orbita', 3.0, 'raggio')
         # 0.35 rad/s su raggio 3 m = ~1.05 m/s tangenziali, passo d'uomo.
         # Era 1.4 rad/s, cioè 4.2 m/s: su un cerchio così stretto la direzione
         # si invertiva ogni due secondi e il drone non riusciva mai a
         # stabilizzarsi sopra il bersaglio.
-        self.velocita_angolare = 0.35   # rad/s
+        self.velocita_angolare = parametro(
+            self, 'velocita_angolare', 0.35)   # rad/s
 
         # Parametri evasione. Il limite non è la velocità massima del drone
         # ma l'errore a regime del controllo proporzionale, che vale circa
@@ -85,15 +93,18 @@ class TargetMoverNode(Node):
         # rispetto al moto tangenziale dell'orbita. Un veicolo che scappa
         # accelera, e la rampa dà al drone qualche secondo per reagire prima che
         # il bersaglio sia a piena velocità.
-        self.vel_evasione      = 1.2    # m/s a regime, ~4 km/h
-        self.accel_evasione    = 0.7    # m/s^2, ~7.9 s per arrivare a regime
+        self.vel_evasione = parametro(
+            self, 'vel_evasione', 1.2)     # m/s a regime, ~4 km/h
+        self.accel_evasione = parametro(
+            self, 'accel_evasione', 0.7)   # m/s^2, ~7.9 s per il regime
         self.dir_evasione_x    = 0.0
         self.dir_evasione_y    = 0.0
         self.tempo_evasione    = 0.0
         # A 8.3 m/s venti secondi porterebbero il bersaglio a 160 m, fuori da
         # qualunque possibilita di recupero. Dieci bastano a mettere alla prova
         # l'inseguimento senza trasformarlo in una fuga senza ritorno.
-        self.durata_evasione_s = 15.0   # s  -> ~28 m di fuga
+        self.durata_evasione_s = parametro(
+            self, 'durata_evasione_s', 15.0)   # s  -> ~28 m di fuga
 
         self.ultimo_istante = None
         self.proc_pendente  = None
@@ -119,7 +130,41 @@ class TargetMoverNode(Node):
         self.drone_x = msg.pose.position.x
         self.drone_y = msg.pose.position.y
 
+    def _riparti_da_capo(self):
+        """Riporta il bersaglio al punto di partenza dell'orbita.
+
+        Il bersaglio si muove da quando il nodo e nato, mentre la missione parte
+        quando lo decide l'operatore: due prove della stessa configurazione
+        trovavano quindi il bersaglio in punti diversi dell'orbita, e quel solo
+        scarto le rendeva inconfrontabili campione per campione.
+
+        Il riporto avviene mentre la missione e ancora in ATTESA e viene
+        ripetuto fino all'avvio, cosi il bersaglio e fermo al punto di partenza
+        quando la registrazione comincia. Farlo all'istante dell'avvio, come
+        nella prima versione, metteva un salto di parecchi metri nel primo
+        campione della prova: la velocita di picco del bersaglio risultava di
+        15 m/s con il parametro a 1.2.
+        """
+        self.fase = FaseBersaglio.PATTUGLIO
+        self.t = 0.0
+        self.centro_x, self.centro_y = self.centro_iniziale
+        self.pos_x = self.centro_x + self.raggio
+        self.pos_y = self.centro_y
+        self.tempo_evasione = 0.0
+        self.istante_aggancio = None
+
     def on_stato_missione(self, msg: String):
+        in_attesa = FaseMissione.ATTESA.value in msg.data
+        if in_attesa:
+            # Finche la missione non parte il bersaglio resta al punto di
+            # partenza: condizioni iniziali identiche a ogni prova.
+            self._riparti_da_capo()
+        elif self.missione_in_attesa:
+            self.get_logger().info(
+                'Missione avviata — il bersaglio parte da '
+                '({:.1f}, {:.1f})'.format(self.pos_x, self.pos_y))
+        self.missione_in_attesa = in_attesa
+
         if FaseMissione.AGGANCIO.value in msg.data and self.fase == FaseBersaglio.PATTUGLIO:
             adesso = self.get_clock().now().nanoseconds / 1e9
             if self.istante_aggancio is None:
@@ -157,6 +202,12 @@ class TargetMoverNode(Node):
     def muovi_bersaglio(self):
         dt = self._calcola_dt()
 
+        # Missione non ancora avviata: il bersaglio sta dove e, ma la posa va
+        # comunque comandata, altrimenti la fisica di Gazebo se ne impossessa.
+        if self.missione_in_attesa:
+            self._invia_posa(self.pos_x, self.pos_y, self.quota_modello)
+            return
+
         if self.fase == FaseBersaglio.PATTUGLIO:
             self.t += self.velocita_angolare * dt
             self.pos_x = self.centro_x + self.raggio * math.cos(self.t)
@@ -171,9 +222,19 @@ class TargetMoverNode(Node):
 
             if self.tempo_evasione >= self.durata_evasione_s:
                 self.fase = FaseBersaglio.PATTUGLIO
-                self.centro_x = self.pos_x
-                self.centro_y = self.pos_y
-                self.t = 0.0
+                # L'orbita riprende dal punto in cui la fuga si e fermata.
+                # Prima il centro veniva messo sulla posizione corrente con
+                # t = 0, e la posizione successiva valeva centro + raggio:
+                # un salto istantaneo di 3 metri, cioe l'intero raggio
+                # dell'orbita. Il tracker lo vedeva come uno spostamento
+                # impossibile del bersaglio e poteva perdere l'aggancio per un
+                # artefatto del simulatore, non per un limite del controllo.
+                # Mettendo il centro dietro la direzione di fuga e la fase
+                # dell'orbita pari a quella direzione, la posizione resta
+                # invariata e il moto prosegue senza strappi.
+                self.t = math.atan2(self.dir_evasione_y, self.dir_evasione_x)
+                self.centro_x = self.pos_x - self.raggio * math.cos(self.t)
+                self.centro_y = self.pos_y - self.raggio * math.sin(self.t)
                 self.get_logger().info('Evasione completata — riprende pattugliamento')
 
         self._invia_posa(self.pos_x, self.pos_y, self.quota_modello)

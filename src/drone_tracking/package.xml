@@ -11,6 +11,8 @@
   <license>MIT</license>
 
   <depend>rclpy</depend>
+  <!-- SetParametersResult, per l'aggiornamento a caldo dei parametri -->
+  <depend>rcl_interfaces</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>

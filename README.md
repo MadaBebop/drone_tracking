@@ -54,6 +54,9 @@ MAVROS2 (bridge MAVLink ↔ ROS 2)
 │         ↓ /mission/stato                      │
 │  target_mover_node                            │
 │    → muove ed evade il bersaglio in Gazebo    │
+│  metrics_node                                 │
+│    → registra la prova su CSV, con la verità  │
+│      a terra letta da Gazebo                  │
 └───────────────────────────────────────────────┘
 ```
 
@@ -331,8 +334,8 @@ Macchina a stati che governa l'intera missione. La fase corrente è pubblicata s
 | `AGGANCIO` | Bersaglio confermato: il controllo passa a `controller_node`. |
 | `RICERCA` | Bersaglio perso: spirale espandibile attorno all'ultima posizione nota. |
 
-**Percorso di pattugliamento** — circuito quadrato a 12 m di quota, con soglia di
-raggiungimento a 1.2 m:
+**Percorso di pattugliamento** — circuito quadrato a 12 m di quota, con soglia
+di raggiungimento pari al parametro `soglia_waypoint`:
 
 ```
 (0,0) → (20,0) → (20,20) → (0,20) → (0,0)
@@ -341,29 +344,43 @@ raggiungimento a 1.2 m:
 Il vertice `(20,20)` coincide con la zona in cui orbita il bersaglio. Se il giro
 si chiude senza aggancio, il pattugliamento riparte dal waypoint 1.
 
-**Aggancio** — richiede **5 frame consecutivi** con bersaglio visibile, e solo
-sopra i 2 m di quota, per evitare falsi positivi durante il decollo.
+**Aggancio** — richiede `frame_conferma_richiesti` messaggi consecutivi con
+bersaglio visibile, e solo sopra i 2 m di quota, per evitare falsi positivi
+durante il decollo.
 
-**Perdita e ricerca** — dopo **20 frame** (~2 s) senza bersaglio in `AGGANCIO`,
-la fase passa a `RICERCA`: il drone descrive una spirale attorno alla propria
-posizione al momento della perdita, con raggio iniziale 3 m che cresce di
-0.002 m per tick. Bastano 5 frame consecutivi di nuova visibilità per tornare in
-`AGGANCIO`.
+**Perdita e ricerca** — trascorso `soglia_avvia_ricerca_s` senza bersaglio in
+`AGGANCIO`, la fase passa a `RICERCA`: il drone descrive una spirale attorno
+alla propria posizione al momento della perdita, con raggio iniziale 3 m che
+cresce di `ricerca_vel_espansione` al secondo fino a `ricerca_raggio_max`, oltre
+il quale la ricerca è dichiarata fallita e la missione torna a
+`PATTUGLIAMENTO`. Bastano `frame_conferma_riaggancio` messaggi consecutivi di
+nuova visibilità per tornare in `AGGANCIO`.
+
+Il conteggio della perdita avviene sia all'arrivo dei messaggi del tracker sia
+nel timer periodico: se `/target/tracked_position` tace del tutto — detector
+fermo, ponte delle immagini caduto — nessun messaggio farebbe partire il
+conteggio, e la fase resterebbe `AGGANCIO` a tempo indeterminato.
 
 ### detector_node
 
 Legge il feed della telecamera montata sul drone (puntata a **nadir**, FOV
-orizzontale 60°, 640×480 a 15 Hz) e isola il bersaglio rosso con doppia soglia
-HSV — due intervalli, perché il rosso è a cavallo del wrap-around della tinta:
+orizzontale 90°, 640×480, `update_rate` dichiarato 30 Hz ma reso molto piu
+basso dal rasterizzatore software — vedi *Problemi noti*) e isola il bersaglio
+rosso con doppia soglia HSV: due intervalli, perché il rosso è a cavallo del
+wrap-around della tinta.
 
 ```
-mask1: H ∈ [0, 10]     S ∈ [120, 255]  V ∈ [70, 255]
-mask2: H ∈ [170, 180]  S ∈ [120, 255]  V ∈ [70, 255]
+mask1: H ∈ [0, tolleranza_tinta]         S ≥ saturazione_minima  V ≥ valore_minimo
+mask2: H ∈ [180 − tolleranza_tinta, 180] S ≥ saturazione_minima  V ≥ valore_minimo
 ```
+
+I tre estremi sono parametri ROS (`tolleranza_tinta`, `saturazione_minima`,
+`valore_minimo`): saturazione e valore minimi escludono i grigi e le zone in
+ombra, che rientrerebbero nella tinta giusta.
 
 Del contorno più grande calcola il centroide via momenti di immagine e lo
-normalizza in `[-1, +1]`. I contorni sotto **200 px²** vengono scartati come
-rumore visivo.
+normalizza in `[-1, +1]`. I contorni sotto `area_minima_px` vengono scartati
+come rumore visivo.
 
 Il campo `z` del messaggio trasporta l'**area del contorno** e funge da flag di
 visibilità: `z > 0` significa bersaglio presente. Tutti i nodi a valle usano
@@ -381,14 +398,22 @@ disegnati sul frame.
 ### jammer_node
 
 Simula un sistema di guerra elettronica che si interpone tra detector e tracker.
-Cicla automaticamente ON/OFF: **40 tick attivo (~4 s)**, **100 tick inattivo
-(~10 s)**.
+Cicla automaticamente ON/OFF su un timer a 10 Hz: `jam_on_duration` tick attivo,
+`jam_off_duration` inattivo.
 
 Quando il jamming è attivo:
 
 - pubblica `/gps/jammed: true` e `/rf/noise_level: 0.8`
-- inietta rumore gaussiano (σ = 0.3) sulle coordinate, con clamp a `[-1, +1]`
-- con probabilità **30%** simula la perdita totale del pacchetto (azzera x, y, z)
+- inietta rumore gaussiano di deviazione standard `deviazione_rumore` sulle
+  coordinate, con clamp a `[-1, +1]`
+- con probabilità `probabilita_perdita_segnale` simula la perdita totale del
+  pacchetto (azzera x, y, z)
+
+**Il disturbo è ripetibile.** Il generatore pseudocasuale parte da un seme
+fisso, il parametro `seed`: due prove della stessa configurazione ricevono lo
+stesso disturbo, quindi il loro confronto misura la modifica al codice e non due
+sequenze di rumore diverse. Con `seed` negativo si torna al comportamento non
+deterministico.
 
 Due accorgimenti importanti: non corrompe segnali già nulli (non genera falsi
 positivi dal nulla) ed è limitato a un messaggio ogni 50 ms, perché a piena
@@ -400,17 +425,26 @@ Filtro di Kalman a 4 stati `[x, y, vx, vy]` in coordinate immagine.
 
 | Matrice | Nome nel codice | Ruolo |
 |---|---|---|
-| F | `evoluzione_stato` | Modello cinematico a velocità costante (dt = 0.1) |
+| F | `evoluzione_stato` | Modello cinematico a velocità costante, con `dt` reale |
 | H | `mappa_osservazione` | Osserva solo posizione x/y |
-| Q | `incertezza_modello` | `diag(0.01, 0.01, 0.5, 0.5)` — alta su velocità |
+| Q | `_matrice_Q(dt)` | Rumore di processo, ricostruito sul `dt` effettivo |
 | R | `incertezza_sensore` | Adattiva, vedi sotto |
 | K | `guadagno_kalman` | Bilancia modello e misura |
+
+**Q dipende dal `dt`.** Era una matrice costante, sommata identica a ogni
+predizione qualunque fosse il tempo trascorso: al ritmo variabile della
+telecamera lo stesso intervallo veniva penalizzato o premiato a caso. Ora si usa
+la discretizzazione standard di un modello a velocità quasi costante: da
+un'accelerazione ignota di intensità `intensita_rumore_accel`, integrata su
+`dt`, seguono una varianza `q·dt³/3` sulla posizione, `q·dt` sulla velocità e
+una covarianza `q·dt²/2` fra le due — termini incrociati che nel modello
+esistono e che la matrice diagonale precedente ignorava.
 
 **R adattiva** — è il punto centrale della resistenza al jamming. Il tracker si
 iscrive a `/rf/noise_level` e ricalcola l'incertezza di misura a ogni variazione:
 
 ```
-R = 0.05 + (2.0 − 0.05) · livello_rumore
+R = rumore_sensore_base + (rumore_sensore_max − rumore_sensore_base) · livello_rumore
 ```
 
 Con il jamming attivo (`livello_rumore = 0.8`) l'incertezza di misura sale di
@@ -420,25 +454,42 @@ detector. È l'equivalente in coordinate immagine di un INS che degrada
 gracefully quando il GNSS diventa inaffidabile.
 
 **Gestione della perdita di segnale** — durante i buchi il filtro pubblica la
-predizione, tollerando fino a **5 frame** consecutivi; oltre quella soglia si
-resetta e pubblica un punto nullo, segnalando la perdita a mission e controller.
+predizione, tollerando fino a `soglia_perdita` messaggi consecutivi; oltre
+quella soglia si resetta e pubblica un punto nullo, segnalando la perdita a
+mission e controller.
 
-La velocità stimata viene inoltre smorzata al **60%** a ogni correzione: senza
-questo freno, il rumore del jammer veniva interpretato come moto reale del
-bersaglio e la predizione divergeva.
+**Sullo smorzamento della velocità stimata, rimosso.** Una versione precedente
+moltiplicava per 0.6 la velocità nello stato a ogni correzione, per contenere le
+predizioni sbagliate. Era uno smorzamento applicato allo stato senza toccare la
+covarianza corrispondente: il filtro dichiarava una fiducia che non
+corrispondeva più alla stima, e la coerenza fra le due è l'unica cosa che rende
+ottimo un filtro di Kalman. Peggio, il fattore si componeva ad ogni misura:
+dopo dieci aggiornamenti la velocità stimata era lo 0.6% di quella calcolata, e
+la predizione durante una perdita di segnale restava ferma sull'ultima posizione
+invece di estrapolare il moto del bersaglio. Lo stesso effetto — una stima di
+velocità meno nervosa — si ottiene ora per la via corretta, cioè scegliendo
+`intensita_rumore_accel`, che governa quanto la velocità può cambiare fra due
+misure aggiornando di conseguenza anche l'incertezza.
 
 ### controller_node
 
 Controllo **proporzionale-derivativo** che traduce l'errore di posizione nel
 frame della telecamera in comandi di velocità in body frame.
 
-| Parametro | Valore | Unità |
+Tutti i valori sono parametri ROS: la colonna riporta il default nel codice,
+non un numero fisso. `ros2 param get /controller_node kp_x` dice quale era
+attivo durante una prova.
+
+| Parametro | Default | Unità |
 |---|---|---|
 | `kp_x`, `kp_y` | 1.2 | 1/s |
 | `kd_x`, `kd_y` | 0.35 | — |
-| `vel_max` | 8.0 | m/s |
-| `deadzone` | 0.3 | metri |
-| Frequenza | 10 | Hz |
+| `vel_max` | 5.0 | m/s (per asse) |
+| `deadzone` | 1.0 | metri |
+| `durata_coasting_s` | 2.0 | s |
+| `timeout_percezione_s` | 0.5 | s |
+| `timeout_posa_s` / `timeout_quota_s` | 1.0 / 2.0 | s |
+| Frequenza di pubblicazione | 10 | Hz |
 
 **I guadagni agiscono su metri, non su pixel.** L'errore normalizzato d'immagine
 viene prima convertito in scostamento al suolo:
@@ -492,14 +543,24 @@ rivedere.
 **Compensazione d'assetto** — è la correzione che ha reso possibile
 l'inseguimento. La telecamera è solidale al corpo, quindi una rotazione del
 velivolo trasla l'immagine **indipendentemente da dove sia il bersaglio**. Con
-FOV orizzontale 1.047 rad su 640×480 i semicampi valgono 0.524 rad in orizzontale
-e 0.408 in verticale: bastano 10° di pitch per spostare il bersaglio di mezzo
-campo visivo. Il controller sottrae quindi il contributo dell'assetto:
+FOV orizzontale 90° su 640×480 i semicampi valgono 0.785 rad in orizzontale e
+0.644 in verticale: bastano pochi gradi di pitch per spostare il bersaglio di
+una frazione visibile del campo. Il controller sottrae quindi il contributo
+dell'assetto, lavorando **sugli angoli** e non sulle coordinate normalizzate:
 
 ```python
-error_x = msg.x - roll  / 0.5236
-error_y = msg.y + pitch / 0.4084
+alpha_x = atan(msg.x * tan(semi_fov_o)) - roll
+alpha_y = atan(msg.y * tan(semi_fov_v)) + pitch
+norm_x  = tan(alpha_x) / tan(semi_fov_o)
+norm_y  = tan(alpha_y) / tan(semi_fov_v)
 ```
+
+In una proiezione prospettica vale `u = tan(alpha)/tan(semi_fov)`, quindi
+coordinata e angolo non sono proporzionali. Una versione precedente divideva
+l'assetto per il semicampo **in radianti**, che è il primo termine dello sviluppo
+della tangente: sovracorreggeva del 27% in orizzontale e del 16% in verticale,
+cioè a 25° di rollio introduceva un errore fantasma di circa 1.3 m al suolo a
+12 m di quota.
 
 Senza questa sottrazione l'errore misurava l'inclinazione del drone più della
 posizione del bersaglio: correlazione **r = −0.665** fra pitch ed errore
@@ -522,9 +583,27 @@ inclina, e il bersaglio esce prima. Misurato — frazione di frame con bersaglio
 inquadrato: **57%** con FOV 60° e guadagni alzati, **84%** con FOV 90° e guadagni
 metrici.
 
-**Guardia FOV** — le posizioni con `|x| > 1.2` o `|y| > 1.2` vengono ignorate:
-sono predizioni di Kalman ormai fuori dal campo visivo, inseguirle porterebbe il
-drone fuori strada.
+**Guardia FOV** — le posizioni con `|x| > 1.2` o `|y| > 1.2` non vengono
+inseguite: sono predizioni di Kalman ormai fuori dal campo visivo. Non azzerano
+però il comando di colpo, perché è la situazione tipica di una fuga veloce (il
+bersaglio scivola verso il bordo poco prima di sparire): si passa al coasting,
+descritto sotto.
+
+**Coasting alla perdita di vista** — quando il tracker rinuncia, il comando non
+viene azzerato di netto ma smorzato a zero su `durata_coasting_s`, proseguendo
+nella direzione in cui il bersaglio si stava muovendo, che è la più probabile
+per riacquisirlo. Prima il drone restava immobile per tutta l'attesa che precede
+`RICERCA`: la sequenza reale era ~1.4 s di inseguimento sulla predizione di
+Kalman, poi comando nullo fino allo scadere di `soglia_avvia_ricerca_s`.
+
+**Watchdog sugli ingressi** — il timer di pubblicazione verifica che percezione,
+posa e quota si stiano ancora aggiornando; se una tace oltre la propria soglia,
+il comando viene azzerato e l'evento loggato come errore. Senza questa verifica
+la morte di `detector_node`, o un ponte immagini che si ferma, lasciava il drone
+a ripetere all'infinito l'ultima velocità nota — volo alla cieca fino a
+`vel_max`, senza che nulla nei log lo segnalasse. Il comando azzerato viene
+comunque pubblicato: interrompere lo stream di setpoint farebbe uscire ArduPilot
+dalla modalità GUIDED.
 
 **Anti derivative-kick** — al primo frame dopo ogni aggancio la derivata è
 azzerata, altrimenti il salto iniziale dell'errore produrrebbe uno strappo.
@@ -541,13 +620,15 @@ Muove la sfera rossa in Gazebo comandandone la posa tramite il servizio
 
 | Fase | Comportamento | Velocità |
 |---|---|---|
-| `PATTUGLIO` | Orbita circolare attorno a `(20, 20)`, raggio 3 m | 0.35 rad/s ≈ **1.05 m/s** |
-| `EVASIONE` | Fuga in linea retta opposta al drone, per 20 s | **1.2 m/s** |
+| `PATTUGLIO` | Orbita circolare attorno a `(20, 20)`, raggio `raggio_orbita` | `velocita_angolare` (0.35 rad/s ≈ **1.05 m/s**) |
+| `EVASIONE` | Fuga in linea retta opposta al drone, per `durata_evasione_s` | `vel_evasione` a regime, raggiunta con rampa `accel_evasione` |
 
 **Perché queste velocità.** Il limite non è la velocità massima del drone, che
 arriva a 8 m/s, ma l'**errore a regime** del controllo proporzionale: inseguendo
 un bersaglio a velocità costante, l'errore d'immagine si stabilizza intorno a
-`velocità_bersaglio / kp`. Con `kp = 4.0`:
+`velocità_bersaglio / kp`. La tabella seguente è stata misurata con `kp = 4.0`,
+valore di una taratura precedente su coordinate normalizzate (il default attuale
+è 1.2 e agisce su metri):
 
 | Velocità bersaglio | Errore a regime | Esito |
 |---|---|---|
@@ -576,13 +657,132 @@ ciò che mette davvero alla prova il tracker e la fase di `RICERCA`.
 Il ritardo è `ritardo_evasione_s = 10.0`, misurato sull'orologio e non contando
 messaggi. Il conteggio riparte da capo se l'aggancio si interrompe: il bersaglio
 fugge solo dopo essere stato inseguito per **10 secondi consecutivi**, quindi con
-un tracking discontinuo il ritardo osservato è più lungo. Terminata la fuga di
-`durata_evasione_s = 49.0` secondi riprende a orbitare attorno alla nuova
-posizione.
+un tracking discontinuo il ritardo osservato è più lungo. Terminata la fuga,
+lunga `durata_evasione_s`, riprende a orbitare attorno alla nuova posizione.
 
 Il comportamento osservato in simulazione è quello descritto sopra: è questo nodo
 a muovere il bersaglio. Il modello nel world dichiara anche un plugin
 `TrajectoryFollower` che però resta inerte — vedi *Problemi noti*.
+
+### metrics_node
+
+Registra la prova su un file CSV, uno per esecuzione, in `/ws/metrics` (montato
+sull'host come `./metrics/`). Campiona a frequenza fissa — indipendente
+dall'arrivo dei messaggi, così il file si media e si diagramma senza
+reinterpolare — e riporta per ogni istante: fase della missione, validità e
+coordinate del rilevamento e della stima, posizione secondo l'EKF, posizione
+**vera** di drone e bersaglio letta da Gazebo, distanza fra i due, stato del
+jamming, ritmo effettivo della catena di percezione.
+
+La verità a terra viene da `/world/iris_runway/pose/info` e non da MAVROS,
+perché la stima dell'EKF è essa stessa oggetto di misura e non può fare da
+riferimento a se stessa. Entrambe sono registrate: la colonna `dist_xy_ekf`
+accanto a `dist_xy_gt` rende visibile nei dati lo scarto fra le due, che il resto
+del progetto assume nullo.
+
+Alla chiusura il nodo stampa un riepilogo (campioni, percentuale di fotogrammi
+con bersaglio, distanza media, tempo per fase).
+
+---
+
+## Misura e ripetibilità
+
+Le cifre citate in questo documento nascevano da script Python scritti sul
+momento e mai salvati: nessun terzo poteva riprodurle, e due prove della stessa
+configurazione non erano confrontabili perché a cambiare era anche lo strumento.
+Gli elementi che chiudono la lacuna sono quattro.
+
+**Tempo di simulazione.** Tutti i nodi girano con `use_sim_time` attivo e
+`/clock` pontato da Gazebo (`tracking.launch.py`). Prima gli intervalli erano
+misurati sull'orologio di parete, cosa che vale solo perché il SITL gira a
+velocità 1 e non a lockstep — un'assunzione mai dichiarata. Attenzione: con
+`use_sim_time` i timer dei nodi non partono finché `/clock` non pubblica, cioè
+finché Gazebo non è in esecuzione. Per lanciare i nodi da soli:
+
+```bash
+ros2 launch drone_tracking tracking.launch.py use_sim_time:=false
+```
+
+**Disturbo ripetibile.** `jammer_node` parte da un seme fisso (`seed`, default
+42), quindi due prove ricevono la stessa sequenza di rumore.
+
+**Una prova in un comando.** `prova.sh` fa la sequenza completa — fotografa la
+configurazione, decolla se serve, avvia la missione, attende, riassume:
+
+```bash
+prova.sh baseline 150
+```
+
+Una procedura digitata a mano cambia ogni volta di qualche dettaglio, e quel
+dettaglio finisce nei numeri. `metrics_node` apre un file nuovo a ogni avvio di
+missione, quindi una prova corrisponde sempre a un file.
+
+**Dati della prova.** `metrics_node` scrive il CSV; `metriche.py` lo legge:
+
+```bash
+metriche.py riassumi /ws/metrics/metrics_20260904_181500.csv
+metriche.py confronta /ws/metrics/prova_A.csv /ws/metrics/prova_B.csv
+```
+
+`riassumi` dà durata degli agganci, distanza mediana e media, frazione di
+campioni con bersaglio, tempo per fase, ritmo della percezione. `confronta`
+verifica la ripetibilità di due prove gemelle.
+
+**Quanto sono ripetibili, in concreto.** Due prove con la stessa configurazione
+e lo stesso seme, da stack riavviato (misura del 4 settembre 2026, 60 s
+simulati ciascuna):
+
+| | A | B |
+|---|---|---|
+| Sequenza di fasi | `PATTUGLIAMENTO → AGGANCIO` | identica |
+| Durata dell'aggancio | 52.4 s | 53.8 s |
+| Distanza mediana | 2.66 m | 2.51 m |
+| Distanza media | 5.33 m | 5.32 m |
+| Bersaglio rilevato | 85.5% | 85.0% |
+| Fattore di tempo reale | 0.30x | 0.26x |
+
+Le grandezze aggregate coincidono entro il 3%, ma le **posizioni istantanee
+no**: allineando le due prove riga per riga, la posizione del drone differisce
+in media di 6 m. Non e divergenza della dinamica, e sfasamento — la missione
+parte a un istante diverso e da lì tutto slitta. La ripetibilità del progetto e
+quindi **in distribuzione, non in traiettoria**: si confrontano durata degli
+agganci, distanze mediane e frazioni di visibilità, non gli istanti uno per
+uno.
+
+Per ridurre lo sfasamento, `target_mover_node` riporta il bersaglio al punto di
+partenza dell'orbita quando la missione lascia `ATTESA`: senza questo, ogni
+prova trovava il bersaglio in un punto diverso dell'orbita a seconda di quanto
+era durato il decollo.
+
+**Prove automatiche.** Le correzioni piu facili da rompere in seguito senza
+accorgersene — watchdog, coasting, scalatura di `Q`, soglia di ricerca — hanno
+una prova che le esercita direttamente, senza far volare nulla:
+
+```bash
+colcon test --packages-select drone_tracking && colcon test-result --verbose
+```
+
+Provocare quei casi in simulazione richiederebbe di fermare un nodo a mano o di
+aspettare che scada una soglia; qui il tempo si simula riavvolgendo gli istanti
+registrati dai nodi.
+
+**Configurazione della prova.** Il CSV dice come è andata, non con che taratura,
+e i parametri sono modificabili a caldo. Prima di una prova conviene quindi
+fotografarli:
+
+```bash
+salva_config.sh nome_della_prova
+```
+
+che scrive `<marca>_<nome>.params.yaml` accanto ai CSV. È il motivo per cui le
+costanti tarate sono diventate parametri ROS: un valore letterale nel codice non
+dice nulla su una prova già conclusa.
+
+Per dare un'etichetta al file di una prova:
+
+```bash
+ros2 launch drone_tracking tracking.launch.py etichetta_config:=gimbal_off seed:=7
+```
 
 ---
 
@@ -785,6 +985,28 @@ pulito, quello corrotto dal jammer e la ricostruzione del Kalman sovrapposti.
 
 ## Note tecniche e problemi noti
 
+**Lo stack parte senza simulatore, e nessuno lo dice** — se `start_all.sh` viene
+invocato da una shell che ha gia caricato ROS 2 (`docker compose exec sim bash
+-lc 'start_all.sh'`, oppure entrando nel container e lanciandolo da li), il
+comando `gz sim` **stampa l'elenco dei sottocomandi disponibili e termina con
+esito zero**. Motivo: il CLI `gz` scopre i propri sottocomandi dai file di
+configurazione elencati in `GZ_CONFIG_PATH`, e il source di ROS 2 sovrascrive
+quella variabile con i soli percorsi dei pacchetti vendored
+(`gz_transport_vendor`, `gz_msgs_vendor`), dove `sim` non esiste. L'ambiente
+passa al server tmux e da questo a tutte le finestre.
+
+Il guasto è insidioso perché tutto il resto funziona: MAVROS si avvia, i sette
+nodi partono, `ros2 node list` li elenca tutti, nessun log segnala un errore.
+Con `use_sim_time` i timer restano semplicemente fermi e la missione non fa
+nulla. Sintomo diagnostico: `/clock` non pubblica, e il pannello `gazebo` di
+tmux mostra un prompt invece del log del simulatore.
+
+`start_all.sh` rimette ora il percorso di sistema in testa alla variabile:
+
+```bash
+export GZ_CONFIG_PATH="/usr/share/gz${GZ_CONFIG_PATH:+:$GZ_CONFIG_PATH}"
+```
+
 **Telecamera** — link `camera_link` fissato a `base_link`, pose
 `0.1 0 -0.05 0 1.5708 0`: puntata a **nadir**. Le versioni precedenti la
 inclinavano in avanti (1.047 rad = 60°, documentata erroneamente come 45°). A
@@ -823,6 +1045,33 @@ progetto usa 9012/9013.
 È la chiave per capire il resto di questa sezione. Nel sistema convivono due
 famiglie di nodi con nature diverse.
 
+### Anzi, tre: il tempo simulato non scorre come quello di parete
+
+Prima di distinguere i nodi a timer da quelli a callback va detta una cosa che
+riguarda tutti e due i tipi. Senza accelerazione grafica Gazebo **non tiene il
+passo del tempo reale**: misurato con `metriche.py` su questa macchina, il
+fattore e **0.23**, cioe un secondo simulato richiede oltre quattro secondi di
+orologio. Il fattore non e una costante del progetto: dipende dal carico della
+macchina, ed e per questo che va riportato in ogni prova.
+
+Finche i nodi misuravano gli intervalli sull'orologio di parete, quel rapporto
+si infilava in ogni grandezza calcolata a partire da un `dt`, con conseguenze
+che sono state prese per difetti del controllo:
+
+| Grandezza | Effetto del `dt` di parete |
+|---|---|
+| Velocita del bersaglio | `target_mover_node` integrava il moto sul `dt` di parete, quindi il bersaglio si spostava di ~4.3 volte la velocita nominale. Le prove fatte contro "un bersaglio a 1.2 m/s" avevano di fronte un bersaglio a circa 5 m/s simulati. |
+| Velocita stimata dal Kalman | Il filtro divideva lo spostamento per un `dt` ~4.3 volte troppo grande, sottostimando della stessa quantita la velocita del bersaglio. |
+| Soglie in secondi | `soglia_avvia_ricerca_s`, `ritardo_evasione_s` e le altre valevano circa un quarto del dichiarato in tempo simulato, con un fattore che cambiava fra una prova e la successiva. |
+
+Da qui la scelta di `use_sim_time` come primo intervento in assoluto: non e una
+raffinatezza formale, e la condizione perche i parametri in secondi e in metri
+al secondo significhino quello che dicono. Le prove precedenti a questa
+correzione restano valide come osservazioni, ma i valori di velocita del
+bersaglio che riportano vanno letti moltiplicati per il fattore di allora, che
+non e stato registrato — un'altra ragione per cui `metrics_node` lo scrive
+adesso in ogni riga.
+
 **Guidati da timer** — battono a frequenza fissa, decisa da loro soli:
 `mission_node` a 2 Hz (`create_timer(0.5, …)`), `jammer_node`, la
 ripubblicazione di `controller_node` e `target_mover_node` a 10 Hz.
@@ -857,7 +1106,7 @@ concreti:
 | Ritardo di evasione | 50 conteggi su un topic a 2 Hz → **25 s** invece di 5 | `ritardo_evasione_s = 10.0` |
 | `dt` del Kalman | fisso a 0.1 con ingresso fra 5 e 15 Hz | ricavato dai tempi reali |
 | Derivata del controller | divisione per 0.1 fisso | divisione per il `dt` misurato |
-| Soglia di avvio ricerca | 20 frame → fra 1.5 e 4 s secondo il carico | `soglia_avvia_ricerca_s = 2.0` |
+| Soglia di avvio ricerca | 20 frame → fra 1.5 e 4 s secondo il carico | `soglia_avvia_ricerca_s` |
 | Espansione della spirale | 0.002 per chiamata a 2 Hz = **4 mm/s** | `ricerca_vel_espansione = 0.4` m/s |
 
 **La spirale di ricerca non si allargava** — è il caso più estremo dello stesso
@@ -963,7 +1212,7 @@ grep "update_rate" "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/models/iris_wi
 ```
 
 Il primo deve restituire `1` (sfera statica, altrimenti rotola via da sola), il
-secondo `<update_rate>15</update_rate>`. Se i valori non corrispondono, la
+secondo `<update_rate>30</update_rate>`. Se i valori non corrispondono, la
 simulazione sta girando su asset vecchi e le correzioni del repository non hanno
 effetto.
 
@@ -978,9 +1227,9 @@ campionarlo suggerisce oscillazioni di 0.4 rad/s che non esistono — è aliasin
 Per giudicare l'assetto va usato il topic delle pose di Gazebo, non l'IMU via
 MAVLink.
 
-Il rimedio applicato è abbassare `<update_rate>` della telecamera da 30 a **15**:
-chiedere una frequenza irraggiungibile faceva mancare al renderer ogni scadenza,
-consegnando i frame quando capitava. Misure su 20 s:
+Il rimedio misurato è abbassare `<update_rate>` della telecamera da 30 a **15**:
+chiedere una frequenza irraggiungibile fa mancare al renderer ogni scadenza, e i
+frame vengono consegnati quando capita. Misure su 20 s:
 
 | | `update_rate` 30 | `update_rate` 15 |
 |---|---|---|
@@ -992,22 +1241,27 @@ consegnando i frame quando capitava. Misure su 20 s:
 Il jitter si dimezza senza perdere frequenza. Il residuo dipende dal
 rasterizzatore software: sparisce con accelerazione grafica.
 
+**Nel repository il valore è comunque 30**, con la misura riportata nel commento
+del modello: la scelta è deliberata, perché su una macchina con GPU i 30 Hz sono
+raggiungibili e il jitter non si presenta, mentre abbassare il valore
+penalizzerebbe anche quel caso. Chi gira in headless senza accelerazione e vuole
+un'immagine più regolare può portarlo a 15 in
+`sim/models/iris_with_ardupilot/model.sdf`.
+
 **Frame rate della telecamera nel container** — il sensore dichiara
 `<update_rate>30</update_rate>`, ma in headless senza GPU Gazebo renderizza via
 rasterizzatore software e il topic `/drone/camera/image_raw` resta molto sotto:
 misurato fra **5 e 11 Hz** su WSL2, a seconda del carico della macchina. Il
-tracking funziona comunque, ma
-va tenuto presente che il filtro di Kalman assume `dt = 0.1` (10 Hz) nella matrice
-`evoluzione_stato`: a 5 Hz il passo di predizione sottostima lo spostamento reale
-fra un frame e l'altro, rendendo il tracker più lento a inseguire un bersaglio in
-evasione. Per un confronto quantitativo con la VM, misurare prima il rate reale:
+tracking funziona comunque: il filtro di Kalman ricava il proprio `dt`
+dall'intervallo reale fra due misure, e la matrice del rumore di processo viene
+ricostruita su quel `dt`, quindi una frequenza bassa allarga l'incertezza invece
+di falsare la predizione. Resta il fatto che meno fotogrammi al secondo
+significano meno informazione: per confrontare due prove conviene verificare che
+girassero allo stesso ritmo, colonna `det_hz` del CSV di `metrics_node` oppure
 
 ```bash
 ros2 topic hz /drone/camera/image_raw
 ```
-
-Se serve fedeltà, conviene allineare `dt` al rate misurato o eseguire la
-simulazione con accelerazione grafica.
 
 **Versione del firmware** — ArduPilot non pubblica più un branch per ogni
 release: i branch si fermano a `Copter-4.5`, le versioni successive esistono solo

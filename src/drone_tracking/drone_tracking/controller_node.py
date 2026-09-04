@@ -6,6 +6,7 @@ from geometry_msgs.msg import Point, PoseStamped, Twist
 from std_msgs.msg import Bool, Float64, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from drone_tracking.mission_node import FaseMissione  # type: ignore
+from drone_tracking.parametri import parametro  # type: ignore
 
 class ControllerNode(Node):
     def __init__(self):
@@ -74,15 +75,15 @@ class ControllerNode(Node):
         # Nota: scendere sotto 1.2 e stato provato e peggiora molto (a 0.6 la
         # distanza mediana dal bersaglio passava da 3.5 a 26.7 m): con guadagno
         # basso il drone non tiene il passo.
-        self.kp_x = 1.2      # 1/s
-        self.kp_y = 1.2
-        self.kd_x = 0.35
-        self.kd_y = 0.35
+        self.kp_x = parametro(self, 'kp_x', 1.2)      # 1/s
+        self.kp_y = parametro(self, 'kp_y', 1.2)
+        self.kd_x = parametro(self, 'kd_x', 0.35)
+        self.kd_y = parametro(self, 'kd_y', 0.35)
         # Deve superare la velocita del bersaglio, altrimenti il drone non puo
         # recuperare terreno per costruzione. A 3.5 non pareggiava nemmeno gli
         # 8.3 m/s del bersaglio. Il limite e per asse: il modulo diagonale
         # arriva a vel_max*sqrt(2).
-        self.vel_max = 5.0
+        self.vel_max = parametro(self, 'vel_max', 5.0)
 
         # Zona morta ampia, in metri. Con 0.3 m il drone correggeva anche errori
         # minimi: con kp alto questo produce inclinazioni continue, e ogni grado
@@ -91,14 +92,52 @@ class ControllerNode(Node):
         # quasi fermo. A 1.5 m il drone ignora gli scarti piccoli e resta piatto
         # quando il bersaglio e sotto di lui, conservando il guadagno alto per
         # quando serve davvero, cioe durante una fuga.
-        self.deadzone = 1.0          # metri
+        self.deadzone = parametro(self, 'deadzone', 1.0)   # metri
         self.semi_fov_o = 0.7854     # rad, meta del FOV orizzontale (90°)
         self.semi_fov_v = 0.6435     # rad, meta del FOV verticale su 640x480
+        # Precalcolate: compaiono in ogni messaggio del tracker, sia nella
+        # compensazione d'assetto sia nella conversione in metri.
+        self.tan_semi_fov_o = math.tan(self.semi_fov_o)   # = 1.0 a 90° di FOV
+        self.tan_semi_fov_v = math.tan(self.semi_fov_v)   # = 0.750
 
         self.error_x_prev      = 0.0
         self.error_y_prev      = 0.0
         self.primo_aggancio    = True
         self.cmd_corrente      = Twist()
+
+        # --- Watchdog sugli ingressi ---
+        # Ogni callback registra l'istante del proprio ultimo messaggio. Il
+        # timer di pubblicazione, prima di ripetere il comando, verifica che gli
+        # ingressi su cui quel comando e stato calcolato siano ancora vivi.
+        # Senza questa verifica la morte di detector_node, o un ponte immagini
+        # che si ferma, lasciava il drone a ripetere all'infinito l'ultima
+        # velocita nota: volo alla cieca fino a 5 m/s, senza che nulla nei log
+        # lo segnalasse.
+        self.istante_tracked = None
+        self.istante_posa    = None
+        self.istante_quota   = None
+        self.timeout_percezione_s = parametro(
+            self, 'timeout_percezione_s', 0.5)   # ~5 messaggi al ritmo camera
+        # I due topic di MAVROS non arrivano allo stesso ritmo: la posa segue
+        # LOCAL_POSITION_NED, la quota GLOBAL_POSITION_INT, che ArduPilot
+        # trasmette piu lentamente. Soglie separate, altrimenti la piu lenta
+        # farebbe scattare il watchdog di continuo a drone perfettamente sano.
+        self.timeout_posa_s  = parametro(self, 'timeout_posa_s', 1.0)
+        self.timeout_quota_s = parametro(self, 'timeout_quota_s', 2.0)
+
+        # --- Coasting alla perdita di vista ---
+        # Azzerare il comando appena il tracker rinuncia lasciava il drone
+        # immobile per tutta l'attesa prima di RICERCA: ~1.4 s di inseguimento
+        # sulla predizione di Kalman, poi fermo fino allo scadere di
+        # soglia_avvia_ricerca_s in mission_node. Mantenere per qualche istante
+        # l'ultima velocita comandata, smorzandola a zero, prosegue il moto
+        # nella direzione in cui il bersaglio si stava muovendo, che e la piu
+        # probabile per riacquisirlo. E una versione povera del termine di
+        # anticipo previsto in Fase 5, che usera la velocita stimata dal filtro
+        # invece dell'ultimo comando.
+        self.istante_perdita_vista = None
+        self.cmd_base_coasting     = (0.0, 0.0)
+        self.durata_coasting_s     = parametro(self, 'durata_coasting_s', 2.0)
 
         # on_tracked è guidato dai messaggi del tracker, il cui ritmo segue la
         # telecamera (misurato fra 5 e 13 Hz): il termine derivativo va diviso
@@ -121,10 +160,75 @@ class ControllerNode(Node):
         self.ultimo_istante = adesso
         return float(min(max(dt, self.dt_min), self.dt_max))
 
+    def _ingressi_scaduti(self):
+        """Ingressi che non si aggiornano piu. Lista vuota = tutto vivo."""
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        scaduti = []
+        controlli = (
+            ('percezione (/target/tracked_position)',
+             self.istante_tracked, self.timeout_percezione_s),
+            ('posa (/mavros/local_position/pose)',
+             self.istante_posa, self.timeout_posa_s),
+            ('quota (/mavros/global_position/rel_alt)',
+             self.istante_quota, self.timeout_quota_s),
+        )
+        for nome, istante, limite in controlli:
+            if istante is None or adesso - istante > limite:
+                scaduti.append(nome)
+        return scaduti
+
     def pubblica_velocita_continua(self):
         fase_ok = FaseMissione.AGGANCIO.value in self.fase_missione
-        if self.in_volo and fase_ok:
+        if not (self.in_volo and fase_ok):
+            return
+
+        scaduti = self._ingressi_scaduti()
+        if scaduti:
+            # Fermarsi e l'unica opzione sicura: senza la posa il comando non si
+            # puo nemmeno ruotare nel frame del mondo (serve lo yaw), e senza
+            # percezione non c'e piu un bersaglio da inseguire. Si continua a
+            # pubblicare, azzerato: interrompere del tutto lo stream di setpoint
+            # farebbe uscire ArduPilot da GUIDED.
+            self.cmd_corrente = Twist()
+            self.istante_perdita_vista = None
+            self.primo_aggancio = True
+            self.get_logger().error(
+                'Ingressi scaduti: ' + ', '.join(scaduti) + ' — comando azzerato',
+                throttle_duration_sec=2.0)
             self.mavros_vel_pub.publish(self.cmd_corrente)
+            return
+
+        self.mavros_vel_pub.publish(self._comando_da_pubblicare())
+
+    def _avvia_coasting(self):
+        """Congela il comando da cui parte la rampa di smorzamento.
+
+        Solo la prima chiamata ha effetto: sui messaggi successivi la base non
+        va ritoccata, altrimenti lo smorzamento si applicherebbe piu volte allo
+        stesso valore e il coasting si spegnerebbe in un istante.
+        """
+        if self.istante_perdita_vista is None:
+            self.istante_perdita_vista = self.istante_tracked
+            self.cmd_base_coasting = (self.cmd_corrente.linear.x,
+                                      self.cmd_corrente.linear.y)
+        self.primo_aggancio = True
+        self.ultimo_istante = None
+
+    def _comando_da_pubblicare(self):
+        """Comando corrente, smorzato se il bersaglio non e piu in vista."""
+        if self.istante_perdita_vista is None:
+            return self.cmd_corrente
+
+        trascorso = (self.get_clock().now().nanoseconds / 1e9
+                     - self.istante_perdita_vista)
+        if trascorso >= self.durata_coasting_s:
+            return Twist()
+
+        fattore = 1.0 - trascorso / self.durata_coasting_s
+        cmd = Twist()
+        cmd.linear.x = self.cmd_base_coasting[0] * fattore
+        cmd.linear.y = self.cmd_base_coasting[1] * fattore
+        return cmd
 
     def on_stato_missione(self, msg: String):
         self.fase_missione = msg.data
@@ -132,8 +236,10 @@ class ControllerNode(Node):
         if FaseMissione.AGGANCIO.value not in msg.data:
             self.primo_aggancio = True
             self.cmd_corrente = Twist()
+            self.istante_perdita_vista = None
 
     def on_posa(self, msg: PoseStamped):
+        self.istante_posa = self.get_clock().now().nanoseconds / 1e9
         q = msg.pose.orientation
         self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                               1.0 - 2.0 * (q.y * q.y + q.z * q.z))
@@ -149,31 +255,57 @@ class ControllerNode(Node):
         self.gps_jammed = msg.data
 
     def on_tracked(self, msg: Point):
+        self.istante_tracked = self.get_clock().now().nanoseconds / 1e9
         cmd = Twist()
         target_visible = (msg.x != 0.0 or msg.y != 0.0)
 
         if not target_visible:
-            self.cmd_corrente = Twist()
-            self.primo_aggancio = True
-            self.ultimo_istante = None
+            self._avvia_coasting()
             return
 
-        # Guardia FOV — ignora predizioni Kalman fuori range
+        # Guardia FOV. La stima cade fuori dal campo inquadrabile, quindi non e
+        # affidabile e non la si insegue. Prima si azzerava il comando di netto:
+        # ma questa e la situazione tipica di una fuga veloce, in cui il
+        # bersaglio scivola verso il bordo poco prima di sparire, e azzerare
+        # proprio lì svuotava il coasting del suo contenuto (la base sarebbe
+        # stata zero). Si tratta come una perdita di vista: non si dà retta alla
+        # stima sospetta, ma si prosegue smorzando l'ultimo comando buono.
         if abs(msg.x) > 1.2 or abs(msg.y) > 1.2:
-            self.cmd_corrente = Twist()
+            self._avvia_coasting()
             return
+
+        self.istante_perdita_vista = None
 
         # Si sottrae la traslazione d'immagine dovuta all'assetto, così l'errore
         # rappresenta la posizione del bersaglio e non l'inclinazione del drone.
-        norm_x = msg.x - self.roll / self.semi_fov_o
-        norm_y = msg.y + self.pitch / self.semi_fov_v
+        #
+        # La sottrazione va fatta sugli ANGOLI, non sulle coordinate
+        # normalizzate: in una proiezione prospettica vale
+        # u = tan(alpha)/tan(semi_fov), quindi coordinata e angolo non sono
+        # proporzionali. Dividere l'assetto per il semicampo in radianti, come
+        # si faceva prima, sovracorregge: il denominatore corretto e
+        # tan(0.7854) = 1.0 e non 0.7854 in orizzontale (27% in meno di quanto
+        # veniva sottratto) e tan(0.6435) = 0.750 e non 0.6435 in verticale
+        # (16%). Si converte la misura in angolo, si toglie l'assetto, si torna
+        # in coordinate normalizzate.
+        alpha_x = math.atan(msg.x * self.tan_semi_fov_o) - self.roll
+        alpha_y = math.atan(msg.y * self.tan_semi_fov_v) + self.pitch
+        # Il clamp a 80° evita che la tangente esploda in un transitorio
+        # anomalo: con la guardia FOV a 1.2 e l'assetto limitato a 25° da
+        # ATC_ANGLE_MAX non ci si arriva, e il comando risultante verrebbe
+        # comunque saturato a vel_max poche righe piu sotto.
+        limite = 1.4   # rad
+        alpha_x = max(-limite, min(limite, alpha_x))
+        alpha_y = max(-limite, min(limite, alpha_y))
+        norm_x = math.tan(alpha_x) / self.tan_semi_fov_o
+        norm_y = math.tan(alpha_y) / self.tan_semi_fov_v
 
         # Conversione in metri sul terreno: con la telecamera a nadir e quota h,
         # il semicampo copre h*tan(semi_fov), quindi una coordinata normalizzata
         # vale quella distanza per unità.
         quota = max(self.altitudine, 1.0)
-        error_x = norm_x * quota * math.tan(self.semi_fov_o)
-        error_y = norm_y * quota * math.tan(self.semi_fov_v)
+        error_x = norm_x * quota * self.tan_semi_fov_o
+        error_y = norm_y * quota * self.tan_semi_fov_v
 
         dt = self._calcola_dt()
 
@@ -224,6 +356,7 @@ class ControllerNode(Node):
         #     f'→ v:({cmd.linear.y:.2f},{cmd.linear.x:.2f})')
 
     def on_altitudine(self, msg):
+        self.istante_quota = self.get_clock().now().nanoseconds / 1e9
         self.altitudine = msg.data
         self.in_volo    = self.altitudine > 1.0
 

@@ -41,8 +41,14 @@ services:
       # (niente rebuild) per le modifiche ai file Python.
       - ./src/drone_tracking/drone_tracking:/ws/src/drone_tracking/drone_tracking:ro
       - ./src/drone_tracking/launch:/ws/src/drone_tracking/launch:ro
+      - ./src/drone_tracking/test:/ws/src/drone_tracking/test:ro
       # Frame salvati da snapshot.sh: ispezionabili dall'host senza GUI.
       - ./snapshots:/ws/snapshots:rw
+      # CSV scritti da metrics_node: una prova per file, analizzabili dall'host.
+      - ./metrics:/ws/metrics:rw
+      # Script di prova e analisi: i comandi in /usr/local/bin sono symlink qui
+      # dentro, quindi modificarli sull'host ha effetto immediato senza rebuild.
+      - ./scripts:/usr/local/share/drone_tracking/scripts:ro
       # --- GUI su Linux: decommenta insieme a DISPLAY qui sopra ---
       # - /tmp/.X11-unix:/tmp/.X11-unix:rw
     command: bash

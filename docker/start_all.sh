@@ -14,6 +14,19 @@ SESSION=drone
 WORLD_FILE="${WORLD:-iris_runway.sdf}"
 WORLD_PATH="/opt/ardupilot_gazebo/worlds/${WORLD_FILE}"
 
+# Il CLI `gz` scopre i propri sottocomandi dai file di configurazione elencati
+# in GZ_CONFIG_PATH. Il source di ROS 2 sovrascrive quella variabile con i soli
+# percorsi dei pacchetti vendored (gz_transport_vendor, gz_msgs_vendor), dove
+# `sim` non esiste: `gz sim` stampa l'elenco dei comandi disponibili e termina
+# subito, con esito zero. Lo stack parte senza simulatore, i nodi si avviano
+# tutti correttamente e nulla nei log dice che manca la simulazione — con
+# use_sim_time i timer restano semplicemente fermi.
+# Succede solo se start_all.sh viene invocato da una shell che ha gia caricato
+# ROS 2 (`bash -lc`, oppure `docker compose exec sim bash` e poi lo script),
+# perche l'ambiente passa al server tmux e da questo a tutte le finestre.
+# Rimettere in testa il percorso di sistema copre entrambi i casi.
+export GZ_CONFIG_PATH="/usr/share/gz${GZ_CONFIG_PATH:+:$GZ_CONFIG_PATH}"
+
 if [ ! -f "$WORLD_PATH" ]; then
     echo "ERRORE: mondo non trovato: $WORLD_PATH" >&2
     echo "Mondi disponibili:" >&2

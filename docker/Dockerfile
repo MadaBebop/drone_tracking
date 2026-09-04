@@ -162,14 +162,17 @@ COPY docker/sitl-defaults.parm /opt/sitl-defaults.parm
 COPY scripts/            /usr/local/share/drone_tracking/scripts/
 # I file arrivano da un host Windows: i CRLF romperebbero lo shebang.
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh /usr/local/bin/start_all.sh \
-    && find /usr/local/share/drone_tracking/scripts -type f -name '*.sh' \
-        -exec sed -i 's/\r$//' {} + \
+    && find /usr/local/share/drone_tracking/scripts -type f \
+        \( -name '*.sh' -o -name '*.py' \) -exec sed -i 's/\r$//' {} + \
     && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/start_all.sh \
-    && find /usr/local/share/drone_tracking/scripts -type f -name '*.sh' \
-        -exec chmod +x {} + \
+    && find /usr/local/share/drone_tracking/scripts -type f \
+        \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} + \
     && ln -sf /usr/local/share/drone_tracking/scripts/takeoff.sh  /usr/local/bin/takeoff.sh \
     && ln -sf /usr/local/share/drone_tracking/scripts/snapshot.sh /usr/local/bin/snapshot.sh \
-    && ln -sf /usr/local/share/drone_tracking/scripts/monitor.sh  /usr/local/bin/monitor.sh
+    && ln -sf /usr/local/share/drone_tracking/scripts/monitor.sh  /usr/local/bin/monitor.sh \
+    && ln -sf /usr/local/share/drone_tracking/scripts/metriche.py /usr/local/bin/metriche.py \
+    && ln -sf /usr/local/share/drone_tracking/scripts/salva_config.sh /usr/local/bin/salva_config.sh \
+    && ln -sf /usr/local/share/drone_tracking/scripts/prova.sh /usr/local/bin/prova.sh
 
 # --- Shell interattive ---
 # `docker exec` NON esegue l'ENTRYPOINT, quindi una shell aperta con
