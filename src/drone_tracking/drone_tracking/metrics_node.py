@@ -27,7 +27,7 @@ from datetime import datetime
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import Point, PoseStamped, TwistStamped
 from std_msgs.msg import Bool, Float64, String
 
 # Stesso schema di accesso al simulatore usato da target_mover_node: i binding
@@ -45,7 +45,9 @@ COLONNE = [
     't_sim', 't_wall', 'fase',
     'det_valido', 'det_x', 'det_y', 'det_area', 'det_hz',
     'trk_valido', 'trk_x', 'trk_y', 'trk_area', 'trk_hz',
-    'ekf_x', 'ekf_y', 'ekf_z', 'roll', 'pitch',
+    'trk_vx', 'trk_vy',
+    'ekf_x', 'ekf_y', 'ekf_z', 'roll', 'pitch', 'yaw',
+    'vel_drone_x', 'vel_drone_y',
     'gimbal_roll', 'gimbal_pitch',
     'gt_drone_x', 'gt_drone_y', 'gt_drone_z',
     'gt_target_x', 'gt_target_y', 'gt_target_z',
@@ -84,6 +86,20 @@ class MetricsNode(Node):
                                  self.on_posa, qos_mavros)
         self.create_subscription(Point, '/target/position', self.on_detection, 10)
         self.create_subscription(Point, '/target/tracked_position', self.on_tracked, 10)
+        # Velocita stimata dal filtro, in coordinate immagine al secondo e
+        # relativa al drone: e la grandezza su cui si regge la guida
+        # predittiva, quindi va registrata per poterla confrontare con il moto
+        # reale del bersaglio letto dalla verita a terra.
+        self.create_subscription(Point, '/target/tracked_velocity',
+                                 self.on_tracked_vel, 10)
+        # Velocita del velivolo come la riporta MAVROS. Registrarla accanto
+        # alla posizione vera permette di stabilire in che frame sia
+        # espressa, invece di assumerlo: la guida predittiva la somma alla
+        # stima del filtro, e un frame sbagliato la manda nella direzione
+        # opposta.
+        self.create_subscription(TwistStamped,
+                                 '/mavros/local_position/velocity_local',
+                                 self.on_velocita_drone, qos_mavros)
         self.create_subscription(Bool, '/gps/jammed', self.on_jam, 10)
         # Comandi alla sospensione cardanica. Si registra il comando e non
         # l'angolo effettivo del giunto perche e il comando a dire cosa il nodo
@@ -105,12 +121,15 @@ class MetricsNode(Node):
         self.ekf = None
         self.det = None
         self.trk = None
+        self.trk_vel = None
         self.jam = False
         self.gps_negato = False
         # Assetto del corpo: e la grandezza che si accoppia all'inquadratura,
         # quindi senza di essa l'effetto della stabilizzazione non si misura.
         self.roll = None
         self.pitch = None
+        self.yaw = None
+        self.vel_drone = None
         self.gimbal_roll = None
         self.gimbal_pitch = None
 
@@ -251,6 +270,11 @@ class MetricsNode(Node):
         self.pitch = math.asin(max(-1.0, min(1.0, 2.0 * (q.w * q.y - q.z * q.x))))
         self.roll = math.atan2(2.0 * (q.w * q.x + q.y * q.z),
                                1.0 - 2.0 * (q.x * q.x + q.y * q.y))
+        self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                              1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def on_velocita_drone(self, msg: TwistStamped):
+        self.vel_drone = (msg.twist.linear.x, msg.twist.linear.y)
 
     def on_gimbal_roll(self, msg: Float64):
         self.gimbal_roll = msg.data
@@ -265,6 +289,9 @@ class MetricsNode(Node):
     def on_tracked(self, msg: Point):
         self.trk = (msg.x, msg.y, msg.z)
         self.n_trk += 1
+
+    def on_tracked_vel(self, msg: Point):
+        self.trk_vel = (msg.x, msg.y) if msg.z != 0.0 else None
 
     def on_jam(self, msg: Bool):
         self.jam = bool(msg.data)
@@ -325,10 +352,15 @@ class MetricsNode(Node):
         riga = [round(t_sim, 3), round(t_wall, 3), self.fase]
         riga += [det_valido] + terna(self.det) + [round(self.n_det / dt, 1)]
         riga += [trk_valido] + terna(self.trk) + [round(self.n_trk / dt, 1)]
+        riga += ([round(v, 4) for v in self.trk_vel] if self.trk_vel
+                 else ['', ''])
         riga += terna(self.ekf)
         riga += [round(v, 4) if v is not None else ''
-                 for v in (self.roll, self.pitch,
-                           self.gimbal_roll, self.gimbal_pitch)]
+                 for v in (self.roll, self.pitch, self.yaw)]
+        riga += ([round(v, 4) for v in self.vel_drone] if self.vel_drone
+                 else ['', ''])
+        riga += [round(v, 4) if v is not None else ''
+                 for v in (self.gimbal_roll, self.gimbal_pitch)]
         riga += terna(self.gt_drone)
         riga += terna(self.gt_bersaglio)
         riga += [dist_xy_gt, dist_3d_gt, dist_xy_ekf]

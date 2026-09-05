@@ -98,6 +98,94 @@ def test_compensazione_tiene_conto_del_gimbal():
         nodo.destroy_node()
 
 
+def controller_con_anticipo():
+    """Controller con il termine di anticipo acceso.
+
+    Il default e zero, perche misurato non conviene: le prove che verificano
+    l'aritmetica del termine devono quindi accenderlo esplicitamente,
+    altrimenti passerebbero perche il termine non viene calcolato affatto.
+    """
+    from rclpy.parameter import Parameter
+
+    nodo = controller_in_aggancio()
+    nodo.set_parameters([Parameter('k_anticipo', Parameter.Type.DOUBLE, 1.0)])
+    return nodo
+
+
+def test_anticipo_pareggia_la_velocita_del_bersaglio():
+    """Con il drone fermo, l'anticipo vale la velocita stimata del bersaglio."""
+    nodo = controller_con_anticipo()
+    try:
+        quota = 12.0
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.vel_drone_x = 0.0
+        nodo.vel_drone_y = 0.0
+        nodo.vel_stimata_valida = True
+        nodo.vel_stimata_x = 0.0
+        nodo.vel_stimata_y = 0.1          # unita normalizzate al secondo
+        avanti, laterale = nodo._anticipo(quota)
+        atteso = -0.1 * quota * nodo.tan_semi_fov_v
+        assert abs(avanti - atteso) < 1e-9
+        assert abs(laterale) < 1e-9
+    finally:
+        nodo.destroy_node()
+
+
+def test_anticipo_nullo_se_il_bersaglio_e_fermo():
+    """La stima del filtro e relativa: da sola direbbe che il bersaglio si
+    muove ogni volta che si muove il drone.
+
+    Qui il drone avanza a 2 m/s verso un bersaglio immobile. La velocita
+    relativa vale quindi -2 m/s, e sommata a quella del velivolo deve dare
+    zero: un anticipo diverso da zero significherebbe inseguire il proprio
+    moto.
+    """
+    nodo = controller_con_anticipo()
+    try:
+        quota = 12.0
+        nodo.yaw = 0.0                    # frame velivolo e mondo coincidono
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.vel_drone_x = 2.0
+        nodo.vel_drone_y = 0.0
+        nodo.vel_stimata_valida = True
+        nodo.vel_stimata_x = 0.0
+        nodo.vel_stimata_y = 2.0 / (quota * nodo.tan_semi_fov_v)
+        avanti, laterale = nodo._anticipo(quota)
+        assert abs(avanti) < 1e-9, 'anticipo %.4f: sta inseguendo se stesso' % avanti
+        assert abs(laterale) < 1e-9
+    finally:
+        nodo.destroy_node()
+
+
+def test_anticipo_si_disattiva_senza_i_dati_necessari():
+    from rclpy.parameter import Parameter
+
+    nodo = controller_con_anticipo()
+    try:
+        nodo.vel_stimata_valida = True
+        nodo.vel_stimata_y = 0.1
+
+        # Velocita del velivolo mai ricevuta: la ricostruzione sarebbe errata.
+        nodo.istante_vel_drone = None
+        assert nodo._anticipo(12.0) == (0.0, 0.0)
+
+        # Ricevuta, ma vecchia.
+        nodo.istante_vel_drone = ora(nodo) - 10.0
+        assert nodo._anticipo(12.0) == (0.0, 0.0)
+
+        # Stima del filtro non valida.
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.vel_stimata_valida = False
+        assert nodo._anticipo(12.0) == (0.0, 0.0)
+
+        # Termine disattivato per scelta.
+        nodo.vel_stimata_valida = True
+        nodo.set_parameters([Parameter('k_anticipo', Parameter.Type.DOUBLE, 0.0)])
+        assert nodo._anticipo(12.0) == (0.0, 0.0)
+    finally:
+        nodo.destroy_node()
+
+
 def test_coasting_smorza_invece_di_azzerare():
     nodo = controller_in_aggancio()
     try:

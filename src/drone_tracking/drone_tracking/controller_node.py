@@ -2,7 +2,7 @@
 import math
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point, PoseStamped, Twist
+from geometry_msgs.msg import Point, PoseStamped, Twist, TwistStamped
 from std_msgs.msg import Bool, Float64, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from drone_tracking.mission_node import FaseMissione  # type: ignore
@@ -29,6 +29,11 @@ class ControllerNode(Node):
         self.sub = self.create_subscription(
             Point, '/target/tracked_position', self.on_tracked, 10)
 
+        # Velocita del bersaglio stimata dal filtro, in coordinate immagine al
+        # secondo e relativa al drone.
+        self.create_subscription(
+            Point, '/target/tracked_velocity', self.on_velocita_stimata, 10)
+
         self.gps_sub = self.create_subscription(
             Bool, '/gps/jammed', self.on_gps_status, 10)
 
@@ -48,6 +53,14 @@ class ControllerNode(Node):
             PoseStamped, '/mavros/local_position/pose',
             self.on_posa, qos_mavros)
 
+        # Velocita del velivolo nel frame locale ENU. Serve a ricostruire la
+        # velocita assoluta del bersaglio: quella stimata dal filtro e
+        # relativa, e senza questo termine il comando inseguirebbe una
+        # grandezza che dipende anche dal proprio moto.
+        self.create_subscription(
+            TwistStamped, '/mavros/local_position/velocity_local',
+            self.on_velocita_drone, qos_mavros)
+
         self.cmd_pub = self.create_publisher(
             Twist, '/drone/cmd_vel', 10)
 
@@ -63,6 +76,39 @@ class ControllerNode(Node):
         self.roll           = 0.0
         self.gimbal_roll    = 0.0
         self.gimbal_pitch   = 0.0
+
+        # --- Guida predittiva ---
+        # Con k = 1 il comando conterrebbe per intero la velocita stimata del
+        # bersaglio: a regime il drone la pareggerebbe invece di inseguirla, e
+        # l'errore residuo velocita/kp si annullerebbe. In teoria.
+        #
+        # Misurato, non paga. Contro un bersaglio in fuga a 5.5 m/s, con la
+        # stima del filtro gia corretta in scala:
+        #     k = 0.0  ->  84.0% di fotogrammi con bersaglio, mediana 3.92 m
+        #     k = 0.4  ->  77.6%                              mediana 4.21 m
+        #     k = 0.7  ->  82.0%                              mediana 4.06 m
+        #     k = 1.0  ->  74.0%                              mediana 6.42 m
+        # Lo zero e il punto migliore e i valori intermedi si equivalgono entro
+        # la dispersione fra prove ripetute.
+        #
+        # La ragione e la qualita della stima, non il termine in se: la
+        # correlazione fra velocita stimata e velocita vera del bersaglio vale
+        # circa 0.6, quindi poco piu di un terzo della varianza della stima e
+        # segnale. Un termine di anticipo somma l'intera stima al comando di
+        # velocita, rumore compreso, e quel rumore costa piu del ritardo che
+        # elimina. Per renderlo conveniente serve una stima migliore, non un
+        # guadagno diverso: la via naturale e dare al filtro la velocita del
+        # velivolo come ingresso noto, cosi che stimi direttamente la velocita
+        # assoluta del bersaglio invece di ricavarla per differenza.
+        #
+        # Il termine resta disponibile e parametrico, spento per default.
+        self.k_anticipo = parametro(self, 'k_anticipo', 0.0)
+        self.vel_stimata_x = 0.0
+        self.vel_stimata_y = 0.0
+        self.vel_stimata_valida = False
+        self.vel_drone_x = 0.0
+        self.vel_drone_y = 0.0
+        self.istante_vel_drone = None
 
         # Compensazione d'assetto. La telecamera è solidale al corpo: una
         # rotazione del velivolo trasla l'immagine indipendentemente da dove si
@@ -212,6 +258,46 @@ class ControllerNode(Node):
 
         self.mavros_vel_pub.publish(self._comando_da_pubblicare())
 
+    def _anticipo(self, quota):
+        """Velocita da aggiungere al comando, nel frame del velivolo.
+
+        Restituisce (avanti, laterale). Zero quando manca la stima o la
+        velocita del velivolo: senza una delle due la ricostruzione della
+        velocita assoluta del bersaglio sarebbe sbagliata, e un termine di
+        anticipo sbagliato e peggio di nessun termine.
+        """
+        if self.k_anticipo == 0.0 or not self.vel_stimata_valida:
+            return 0.0, 0.0
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        if (self.istante_vel_drone is None
+                or adesso - self.istante_vel_drone > self.timeout_posa_s):
+            self.get_logger().warn(
+                'Nessuna velocita da MAVROS: anticipo disattivato',
+                throttle_duration_sec=5.0)
+            return 0.0, 0.0
+
+        # Da coordinate immagine al secondo a metri al secondo al suolo, con la
+        # stessa conversione usata per la posizione.
+        v_rel_x = self.vel_stimata_x * quota * self.tan_semi_fov_o
+        v_rel_y = self.vel_stimata_y * quota * self.tan_semi_fov_v
+
+        # Stessa mappatura fra assi immagine e assi velivolo usata per
+        # l'errore: un bersaglio che si sposta verso +x nell'immagine si
+        # allontana verso la sinistra del velivolo.
+        rel_avanti = -v_rel_y
+        rel_laterale = -v_rel_x
+
+        # La velocita del velivolo e nel frame del mondo: va riportata nel
+        # frame del velivolo per sommarla, poi il totale torna nel mondo nel
+        # punto in cui viene usata.
+        cos_y = math.cos(self.yaw)
+        sin_y = math.sin(self.yaw)
+        drone_avanti = self.vel_drone_x * cos_y + self.vel_drone_y * sin_y
+        drone_laterale = -self.vel_drone_x * sin_y + self.vel_drone_y * cos_y
+
+        return (self.k_anticipo * (rel_avanti + drone_avanti),
+                self.k_anticipo * (rel_laterale + drone_laterale))
+
     def _avvia_coasting(self):
         """Congela il comando da cui parte la rampa di smorzamento.
 
@@ -258,6 +344,16 @@ class ControllerNode(Node):
         self.pitch = math.asin(max(-1.0, min(1.0, 2.0 * (q.w * q.y - q.z * q.x))))
         self.roll = math.atan2(2.0 * (q.w * q.x + q.y * q.z),
                                1.0 - 2.0 * (q.x * q.x + q.y * q.y))
+
+    def on_velocita_stimata(self, msg: Point):
+        self.vel_stimata_x = msg.x
+        self.vel_stimata_y = msg.y
+        self.vel_stimata_valida = (msg.z != 0.0)
+
+    def on_velocita_drone(self, msg: TwistStamped):
+        self.istante_vel_drone = self.get_clock().now().nanoseconds / 1e9
+        self.vel_drone_x = msg.twist.linear.x
+        self.vel_drone_y = msg.twist.linear.y
 
     def on_gimbal_roll(self, msg: Float64):
         self.gimbal_roll = msg.data
@@ -372,6 +468,20 @@ class ControllerNode(Node):
         sin_y = math.sin(self.yaw)
         cmd.linear.x = v_avanti * cos_y - v_laterale * sin_y
         cmd.linear.y = v_avanti * sin_y + v_laterale * cos_y
+
+        # --- Termine di anticipo ---
+        # Il controllo proporzionale corregge lo scarto attuale; questo termine
+        # aggiunge la velocita necessaria a non accumularne di nuovo. La stima
+        # del filtro e relativa al drone, quindi si somma la velocita del
+        # velivolo per ottenere quella assoluta del bersaglio.
+        avanti_ff, laterale_ff = self._anticipo(quota)
+        cmd.linear.x += avanti_ff * cos_y - laterale_ff * sin_y
+        cmd.linear.y += avanti_ff * sin_y + laterale_ff * cos_y
+
+        # La saturazione va applicata al comando completo: i due termini
+        # sommati possono superare il limite anche se ciascuno lo rispetta.
+        cmd.linear.x = max(-self.vel_max, min(self.vel_max, cmd.linear.x))
+        cmd.linear.y = max(-self.vel_max, min(self.vel_max, cmd.linear.y))
 
         self.cmd_corrente = cmd
         self.cmd_pub.publish(cmd)

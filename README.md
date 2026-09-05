@@ -453,6 +453,31 @@ predizione invece che ai dati corrotti. Senza jamming torna a fidarsi del
 detector. È l'equivalente in coordinate immagine di un INS che degrada
 gracefully quando il GNSS diventa inaffidabile.
 
+**La velocità stimata esce dal filtro.** Il filtro calcolava `vx, vy` fin
+dall'inizio, ma nessuno li leggeva. Ora sono pubblicati su
+`/target/tracked_velocity`, in coordinate immagine al secondo e **relativi** al
+drone: l'immagine si muove anche quando a muoversi è il velivolo.
+
+**L'intensità di rumore del modello è tarata sulla verità a terra.** Il valore
+iniziale, 5.0, era stato scelto per riprodurre a `dt` nominale il termine di
+velocità della vecchia matrice costante — un argomento di continuità con una
+matrice che era essa stessa sbagliata. Confrontando la velocità stimata con
+quella reale del bersaglio letta dal simulatore, la pendenza della regressione
+vale:
+
+| `intensita_rumore_accel` | Pendenza in avanti | Pendenza laterale |
+|---|---|---|
+| 5.0 | 2.36 | 1.51 |
+| **0.5** | **1.03** | **0.86** |
+| 0.05 | 0.55 | 0.55 |
+
+A 5.0 la stima era gonfiata del doppio, a 0.05 il filtro insegue troppo
+lentamente e la dimezza. Il difetto era invisibile finché la velocità non è
+servita a qualcuno. La correlazione con la verità resta intorno a 0.6 in tutti
+e tre i casi: quella è la qualità intrinseca della misura e non dipende da
+questo parametro. La correzione ha migliorato anche l'inseguimento di per sé,
+dal 73.2% all'84.0% di fotogrammi con bersaglio a 5.5 m/s di fuga.
+
 **Gestione della perdita di segnale** — durante i buchi il filtro pubblica la
 predizione, tollerando fino a `soglia_perdita` messaggi consecutivi; oltre
 quella soglia si resetta e pubblica un punto nullo, segnalando la perdita a
@@ -607,6 +632,40 @@ dalla modalità GUIDED.
 
 **Anti derivative-kick** — al primo frame dopo ogni aggancio la derivata è
 azzerata, altrimenti il salto iniziale dell'errore produrrebbe uno strappo.
+
+**Guida predittiva, misurata e spenta.** Il controllo è reattivo: corregge lo
+scarto osservato, non anticipa. Da qui l'errore a regime `velocità / kp` di
+5.2. Il rimedio naturale è aggiungere al comando la velocità del bersaglio, che
+il filtro stima già — con una precisazione che cambia il progetto del termine:
+quella stima è **relativa**, e sommarla direttamente duplicherebbe il termine
+derivativo, che usa la stessa grandezza. Per pareggiare la velocità del
+bersaglio serve la sua velocità **assoluta**, cioè quella relativa più quella
+del velivolo letta da `/mavros/local_position/velocity_local` (verificato
+sperimentalmente che sia nel frame del mondo e non del corpo: lo scarto rispetto
+alla verità a terra vale 0.29 m/s contro 0.43 m/s dell'ipotesi opposta).
+
+Implementato così, contro un bersaglio in fuga a 5.5 m/s e con la stima già
+corretta in scala:
+
+| `k_anticipo` | Bersaglio rilevato | Distanza mediana | Durata aggancio |
+|---|---|---|---|
+| **0.0** | **84.0%** | **3.92 m** | 43.4 s |
+| 0.4 | 77.6% | 4.21 m | 41.8 s |
+| 0.7 | 82.0% | 4.06 m | 41.8 s |
+| 1.0 | 74.0% | 6.42 m | 43.8 s |
+
+Lo zero è il punto migliore, e i valori intermedi si equivalgono entro la
+dispersione fra prove ripetute a questa velocità. La ragione non è il termine
+in sé ma la qualità della stima: con correlazione 0.6 fra velocità stimata e
+velocità vera, poco più di un terzo della varianza della stima è segnale, e un
+anticipo somma l'intera stima al comando — rumore compreso — che costa più del
+ritardo che elimina.
+
+Il termine resta nel codice, parametrico e spento per default. Renderlo
+conveniente richiede una stima migliore, non un guadagno diverso: la via
+naturale è dare al filtro la velocità del velivolo come **ingresso noto**, così
+che stimi direttamente la velocità assoluta del bersaglio invece di ricavarla
+per differenza da un'immagine in cui i due moti sono sovrapposti.
 
 Un timer dedicato a 10 Hz ripubblica il comando corrente su
 `/mavros/setpoint_velocity/cmd_vel_unstamped`: ArduPilot esce dal controllo in

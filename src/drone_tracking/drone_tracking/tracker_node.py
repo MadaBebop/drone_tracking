@@ -22,6 +22,13 @@ class TrackerNode(Node):
         self.pub = self.create_publisher(
             Point, '/target/tracked_position', 10)
 
+        # Velocita stimata dal filtro, finora calcolata e mai usata da nessuno.
+        # E in coordinate normalizzate d'immagine al secondo, ed e RELATIVA: la
+        # posizione del bersaglio nell'immagine cambia anche quando a muoversi e
+        # il drone. Il campo z vale 1 quando la stima e utilizzabile.
+        self.pub_vel = self.create_publisher(
+            Point, '/target/tracked_velocity', 10)
+
         self.reset_sub = self.create_subscription(
             Bool, '/tracker/reset', self.on_reset, 10)
 
@@ -64,15 +71,24 @@ class TrackerNode(Node):
         # premiato a caso, e i termini incrociati posizione-velocita, che in
         # questo modello esistono, mancavano del tutto.
         #
-        # Il valore e scelto per riprodurre al dt nominale di 0.1 s il termine
-        # di velocita della vecchia matrice (0.5 = q*dt con q = 5.0), cosi il
-        # confronto con le prove precedenti resta leggibile. Il termine di
-        # posizione risulta invece piu piccolo di quanto fosse (q*dt^3/3 =
-        # 0.0017 contro 0.01), che e corretto: la posizione non e affetta da
-        # rumore proprio, eredita solo quello dell'accelerazione integrata due
-        # volte.
+        # Il valore e stato TARATO sulla verita a terra, non scelto per
+        # continuita. La prima versione usava 5.0, per riprodurre al dt
+        # nominale il termine di velocita della vecchia matrice costante: un
+        # argomento di continuita con una matrice che era essa stessa
+        # sbagliata. Il difetto e rimasto invisibile finche la velocita
+        # stimata non e servita a qualcuno — nessuno la leggeva — e si e
+        # manifestato quando la guida predittiva ha cominciato a usarla,
+        # comandando il doppio del necessario.
+        #
+        # Confrontando la stima con la velocita reale del bersaglio letta dal
+        # simulatore, la pendenza della regressione vale:
+        #     q = 5.00  ->  2.36 in avanti, 1.51 lateralmente (gonfiata)
+        #     q = 0.50  ->  1.03 e 0.86                       (corretta)
+        #     q = 0.05  ->  0.55 e 0.55                       (troppo lenta)
+        # La correlazione resta intorno a 0.6 in tutti e tre i casi: quella e
+        # la qualita intrinseca della misura, e non dipende da questo valore.
         self.intensita_rumore_accel = parametro(
-            self, 'intensita_rumore_accel', 5.0)
+            self, 'intensita_rumore_accel', 0.5)
         # Incertezza della misura, che cresce con il rumore dichiarato sul
         # datalink: e il meccanismo con cui il filtro si fida meno del
         # rilevamento durante il jamming (vedi on_noise_level).
@@ -148,6 +164,14 @@ class TrackerNode(Node):
             self._reset()
             self.get_logger().info('Tracker resettato')
 
+    def _pubblica_velocita(self, valida):
+        stima = Point()
+        if valida:
+            stima.x = float(self.stato_stimato[2].item())
+            stima.y = float(self.stato_stimato[3].item())
+            stima.z = 1.0
+        self.pub_vel.publish(stima)
+
     def _reset(self):
         self.bersaglio_acquisito = False
         self.frame_senza_segnale = 0
@@ -157,6 +181,7 @@ class TrackerNode(Node):
         # Alla ripresa il primo dt ripartirebbe dal tempo trascorso durante la
         # perdita, che non è un intervallo di campionamento valido.
         self.ultimo_istante = None
+        self._pubblica_velocita(False)
 
     def on_detection(self, msg: Point):
         segnale_presente = not (msg.z == 0.0)
@@ -172,6 +197,10 @@ class TrackerNode(Node):
             # farlo faceva perdere un messaggio a ogni riacquisizione, e sotto
             # jamming le riacquisizioni sono continue.
             self.pub.publish(Point(x=float(msg.x), y=float(msg.y), z=float(msg.z)))
+            # Alla prima acquisizione la velocita non e ancora stimata: dirlo
+            # esplicitamente evita che il controllo usi uno zero come se fosse
+            # una misura.
+            self._pubblica_velocita(False)
             return
 
         if not self.bersaglio_acquisito:
@@ -233,6 +262,7 @@ class TrackerNode(Node):
             posizione_stimata.y = float(self.stato_stimato[1].item())
             posizione_stimata.z = float(msg.z)
             self.pub.publish(posizione_stimata)
+            self._pubblica_velocita(True)
         else:
             self.frame_senza_segnale += 1
             if self.frame_senza_segnale > self.soglia_perdita:
@@ -252,6 +282,7 @@ class TrackerNode(Node):
             posizione_stimata.y = float(self.stato_stimato[1].item())
             posizione_stimata.z = float(self.ultima_area)
             self.pub.publish(posizione_stimata)
+            self._pubblica_velocita(True)
             # self.get_logger().info(
             #     f'Tentativo predizione — Frame persi: {self.frame_senza_segnale}/{self.soglia_perdita}')
 
