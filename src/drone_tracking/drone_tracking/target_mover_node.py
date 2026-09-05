@@ -50,8 +50,8 @@ class TargetMoverNode(Node):
         # Stato interno
         self.fase = FaseBersaglio.PATTUGLIO
         self.t = 0.0
-        self.pos_x = 20.0
-        self.pos_y = 20.0
+        self.pos_x = 150.0
+        self.pos_y = 150.0
         self.drone_x = 0.0
         self.drone_y = 0.0
         
@@ -67,21 +67,22 @@ class TargetMoverNode(Node):
         # 10 Hz: ma `gz service` impiega ~360 ms a rispondere e, chiamato in modo
         # bloccante, teneva il timer a ~2.8 Hz. I valori qui sotto riproducono la
         # velocità effettivamente osservata con quel timer strozzato.
-        self.centro_x = 20.0
-        self.centro_y = 20.0
+        self.centro_x = 150.0
+        self.centro_y = 150.0
         # Il centro si sposta dopo ogni evasione: quello iniziale va conservato
         # per poter riportare il bersaglio al punto di partenza.
         self.centro_iniziale = (self.centro_x, self.centro_y)
         # Si assume ATTESA fino a prova contraria: serve a riconoscere il
         # passaggio ATTESA -> missione avviata, non lo stato in se.
         self.missione_in_attesa = True
-        self.raggio   = parametro(self, 'raggio_orbita', 3.0, 'raggio')
-        # 0.35 rad/s su raggio 3 m = ~1.05 m/s tangenziali, passo d'uomo.
-        # Era 1.4 rad/s, cioè 4.2 m/s: su un cerchio così stretto la direzione
-        # si invertiva ogni due secondi e il drone non riusciva mai a
-        # stabilizzarsi sopra il bersaglio.
+        # Raggio dell'orbita di pattuglia. Quaranta metri con 0.25 rad/s fanno
+        # 10 m/s tangenziali, cioe 36 km/h: la velocita a cui un veicolo
+        # pattuglia davvero. Lo scenario precedente aveva raggio 3 m e 1.05 m/s
+        # tangenziali, cioe passo d'uomo su un cerchio piu piccolo del veicolo
+        # che avrebbe dovuto rappresentare.
+        self.raggio   = parametro(self, 'raggio_orbita', 40.0, 'raggio')
         self.velocita_angolare = parametro(
-            self, 'velocita_angolare', 0.35)   # rad/s
+            self, 'velocita_angolare', 0.25)   # rad/s
 
         # Parametri evasione. Il limite non è la velocità massima del drone
         # ma l'errore a regime del controllo proporzionale, che vale circa
@@ -93,24 +94,33 @@ class TargetMoverNode(Node):
         # rispetto al moto tangenziale dell'orbita. Un veicolo che scappa
         # accelera, e la rampa dà al drone qualche secondo per reagire prima che
         # il bersaglio sia a piena velocità.
+        # 15 m/s sono 54 km/h: la fuga di un veicolo su strada sterrata, non
+        # piu quella di un pedone. L'accelerazione di 3 m/s^2 porta a regime in
+        # cinque secondi, che e il comportamento di un mezzo leggero.
         self.vel_evasione = parametro(
-            self, 'vel_evasione', 1.2)     # m/s a regime, ~4 km/h
+            self, 'vel_evasione', 15.0)    # m/s a regime, ~54 km/h
         self.accel_evasione = parametro(
-            self, 'accel_evasione', 0.7)   # m/s^2, ~7.9 s per il regime
+            self, 'accel_evasione', 3.0)   # m/s^2, 5 s per il regime
         self.dir_evasione_x    = 0.0
         self.dir_evasione_y    = 0.0
         self.tempo_evasione    = 0.0
         # A 8.3 m/s venti secondi porterebbero il bersaglio a 160 m, fuori da
         # qualunque possibilita di recupero. Dieci bastano a mettere alla prova
         # l'inseguimento senza trasformarlo in una fuga senza ritorno.
+        # Venti secondi a 15 m/s portano il bersaglio a circa 260 m dal punto
+        # di partenza: molto piu del semicampo inquadrato, quindi la fuga mette
+        # davvero alla prova l'inseguimento invece di svolgersi tutta dentro
+        # una sola inquadratura.
         self.durata_evasione_s = parametro(
-            self, 'durata_evasione_s', 15.0)   # s  -> ~28 m di fuga
+            self, 'durata_evasione_s', 20.0)   # s  -> ~260 m di fuga
 
         self.ultimo_istante = None
         self.proc_pendente  = None
 
         self.nome_modello  = 'bersaglio'
-        self.quota_modello = 0.3   # raggio della sfera: la appoggia a terra
+        # Meta dell'altezza del veicolo: lo appoggia a terra invece di
+        # interrarlo o farlo levitare.
+        self.quota_modello = 0.8
         self.servizio_posa = '/world/iris_runway/set_pose'
 
         if GZ_BINDINGS:

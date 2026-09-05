@@ -88,11 +88,18 @@
          accumulava velocità e scivolava via dalla traiettoria prevista. -->
     <model name="bersaglio">
       <static>true</static>
-      <pose>20 20 0.3 0 0 0</pose>
+      <pose>150 150 0.8 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
-            <sphere><radius>0.3</radius></sphere>
+            <!-- Veicolo, non piu sfera da 60 cm. Il motivo e geometrico: a
+                 50 m di quota, con 90 gradi di campo e 640 pixel, ogni pixel
+                 copre 0.0025 rad e la sfera occuperebbe 29 px^2, sotto la
+                 soglia di rilevamento. Un veicolo di 4x2 m ne occupa 531,
+                 cinque volte la soglia. La quota serve per contenere un
+                 bersaglio veloce nell'inquadratura, e la dimensione del
+                 bersaglio e il prezzo della quota. -->
+            <box><size>4.0 2.0 1.6</size></box>
           </geometry>
           <material>
             <ambient>1 0 0 1</ambient>
@@ -101,7 +108,7 @@
         </visual>
         <collision name="collision">
           <geometry>
-            <sphere><radius>0.3</radius></sphere>
+            <box><size>4.0 2.0 1.6</size></box>
           </geometry>
         </collision>
       </link>

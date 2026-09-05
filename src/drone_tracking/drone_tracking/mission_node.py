@@ -53,13 +53,18 @@ class MissionNode(Node):
         # Publisher: per resettare lo stato missione
         self.reset_pub = self.create_publisher(Bool, '/tracker/reset', 10)
         
-        # Il drone va dritto verso la zona di oscillazione (8, 0)
+        # Circuito di pattugliamento, scalato allo scenario realistico: 150 m
+        # di lato invece di 20, a 50 m di quota invece di 12. A 20 m/s il
+        # vecchio circuito si percorreva per intero in poco piu di un secondo,
+        # e la quota di 12 m dava un'impronta a terra di 24 m, che un veicolo
+        # a 15 m/s attraversa in un secondo e mezzo. A 50 m l'impronta e di
+        # 100 m e il margine diventa di quasi sette secondi.
         self.waypoints = [
-            ( 0.0,  0.0, 12.0),   # origine - partenza
-            (20.0,  0.0, 12.0),   # nord
-            (20.0, 20.0, 12.0),   # nord-est - pallina qui
-            ( 0.0, 20.0, 12.0),   # est
-            ( 0.0,  0.0, 12.0),   # ritorno
+            (  0.0,   0.0, 50.0),   # origine - partenza
+            (150.0,   0.0, 50.0),   # nord
+            (150.0, 150.0, 50.0),   # nord-est - il bersaglio pattuglia qui
+            (  0.0, 150.0, 50.0),   # est
+            (  0.0,   0.0, 50.0),   # ritorno
         ]
 
         self.waypoint_corrente = 0
@@ -78,11 +83,12 @@ class MissionNode(Node):
         self.timeout_telemetria_s = parametro(
             self, 'timeout_telemetria_s', 1.0)   # MAVROS pubblica a 10-50 Hz
         
-        # Tolleranza sul waypoint. Alzata da 1.2 a 3.0 m: con 1.2 il drone doveva
-        # arrivare quasi fermo per centrare il punto, e a velocita di crociera lo
-        # sorpassava e tornava indietro, oscillando. Tre metri su un circuito di
-        # 20 non cambiano il percorso e permettono di non frenare.
-        self.soglia_waypoint = parametro(self, 'soglia_waypoint', 3.0)
+        # Tolleranza sul waypoint, in metri. Deve valere qualche decimo di
+        # secondo di volo, altrimenti il drone deve arrivare quasi fermo per
+        # centrare il punto e a velocita di crociera lo sorpassa, oscillando.
+        # A 20 m/s tre metri sarebbero 0.15 s: quindici metri su una tratta di
+        # 150 non cambiano il percorso e permettono di non frenare.
+        self.soglia_waypoint = parametro(self, 'soglia_waypoint', 15.0)
         
         self.rilevamento_attivo = False
         self.fase = FaseMissione.ATTESA
@@ -109,18 +115,29 @@ class MissionNode(Node):
         # allontanava a 1.2 m/s: non lo raggiungeva mai.
         self.ricerca_centro_x = 0.0
         self.ricerca_centro_y = 0.0
-        self.ricerca_raggio   = 3.0
+        # Raggio iniziale della spirale: dell'ordine dell'impronta a terra, che
+        # a 50 m di quota vale 100 m. Partire da 3 m come nello scenario
+        # ridotto significherebbe cercare dentro un'area gia inquadrata.
+        self.ricerca_raggio   = 30.0
         self.ricerca_t        = 0.0
         self.ricerca_espansione = 0.0
+        # 0.25 rad/s su raggio 30 m fanno 7.5 m/s tangenziali, entro le
+        # possibilita del velivolo.
         self.ricerca_vel_angolare = parametro(
-            self, 'ricerca_vel_angolare', 0.35)   # rad/s
-        # 0.4 m/s di espansione su un giro da ~18 s fanno ~7 m fra un braccio e
-        # il successivo: meno dei ~15 m inquadrati a 12 m di quota, quindi la
-        # spirale non lascia zone scoperte.
+            self, 'ricerca_vel_angolare', 0.25)   # rad/s
+        # Un giro dura 2*pi/0.25 = 25 s: con 3 m/s di espansione i bracci
+        # distano 75 m, meno dei 100 inquadrati a 50 m di quota, quindi la
+        # spirale non lascia zone scoperte. Con il valore precedente, 0.4 m/s,
+        # i bracci disterebbero 10 m e la ricerca sarebbe dieci volte piu lenta
+        # del necessario.
         self.ricerca_vel_espansione = parametro(
-            self, 'ricerca_vel_espansione', 0.4)   # m/s
+            self, 'ricerca_vel_espansione', 3.0)   # m/s
+        # Un bersaglio a 15 m/s percorre 300 m nei venti secondi di fuga: il
+        # raggio massimo deve essere dello stesso ordine, altrimenti la ricerca
+        # rinuncia prima di aver coperto la zona in cui il bersaglio puo
+        # ragionevolmente trovarsi.
         self.ricerca_raggio_max = parametro(
-            self, 'ricerca_raggio_max', 25.0)      # m, poi si rinuncia
+            self, 'ricerca_raggio_max', 300.0)     # m, poi si rinuncia
         self.ricerca_ultimo_istante = None
         # Attesa prima di dichiarare perso il bersaglio, in SECONDI. Era un
         # conteggio di frame tarato su 10 Hz, ma /target/tracked_position segue

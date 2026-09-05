@@ -8,21 +8,37 @@
 # perche gli IMU simulati divergono quando la fisica singhiozza.
 ARMING_SKIPCHK 1
 
-# --- Prestazioni, dimensionate su un bersaglio a 8.3 m/s (30 km/h) ---
+# --- Prestazioni, dimensionate su un bersaglio a 15 m/s (54 km/h) ---
 # Il tetto di velocita deve superare quello del bersaglio, altrimenti il drone
 # non puo recuperare terreno per costruzione. Accelerazione e jerk determinano
 # quanto in fretta il drone puo invertire la marcia, cioe il caso peggiore
 # dell'inseguimento.
-WP_SPD 5.0
-WP_ACC 2.5
-WP_JERK 4.0
-PSC_JERK_NE 10.0
+# Attenzione ai nomi: in Copter 4.7 WPNAV_SPEED e WPNAV_ACCEL si chiamano
+# WP_SPD e WP_ACC, e ANGLE_MAX si chiama ATC_ANGLE_MAX. I nomi vecchi non
+# esistono e verrebbero ignorati in silenzio.
+WP_SPD 20.0
+WP_ACC 5.0
+WP_JERK 8.0
+PSC_JERK_NE 20.0
 
-# 22 gradi: e il massimo compatibile con l osservabilita. La traslazione
-# dell immagine vale inclinazione/semi_fov, e a 45 gradi di semicampo 22 gradi
-# spostano il bersaglio di mezzo semicampo. Oltre i 25 gradi il bersaglio esce
-# dall inquadratura: misurato, aggancio caduto in 8 s con 35 gradi.
-ATC_ANGLE_MAX 25.0
+# 40 gradi, non piu 25. Il limite precedente non nasceva dalla meccanica ma
+# dall'osservabilita: con la telecamera solidale al corpo ogni grado di
+# inclinazione traslava l'inquadratura, e oltre i 25 gradi il bersaglio ne
+# usciva — misurato, aggancio caduto in 8 s con 35 gradi. Da quando la
+# telecamera e su sospensione cardanica quel vincolo non esiste piu, e
+# l'accoppiamento fra assetto e immagine e sceso da r = -0.86 a -0.22.
+# Tenere 25 gradi significava conservare un tetto di accelerazione senza piu
+# la ragione che lo giustificava: 40 gradi portano l'accelerazione orizzontale
+# massima da 4.6 a 8.2 m/s^2, cioe da fermo a 15 m/s in meno di due secondi.
+ATC_ANGLE_MAX 40.0
+
+# Velocita di salita e discesa. Il default di 2.5 m/s andava bene per una
+# quota di crociera di 12 m; a 50 m il solo decollo richiederebbe venti
+# secondi simulati, che su una macchina che gira a un quarto del tempo reale
+# diventano oltre un minuto di attesa a ogni prova.
+WP_SPD_UP 6.0
+WP_SPD_DN 3.0
+PILOT_SPD_UP 6.0
 
 # --- Coerenza degli IMU simulati ---
 # "Arm: Gyros inconsistent" nasce dal confronto fra i tre giroscopi simulati, che

@@ -892,12 +892,16 @@
       <axis>
         <xyz expressed_in="__model__">1 0 0</xyz>
         <limit>
-          <!-- 45 gradi per asse: oltre, la sospensione entrerebbe nel campo
-               inquadrato e comparirebbe nell'immagine. Il limite e anche il
-               punto in cui la stabilizzazione satura e il residuo torna a
-               carico della compensazione analitica. -->
-          <lower>-0.7854</lower>
-          <upper>0.7854</upper>
+          <!-- 60 gradi per asse. Erano 45, scelti quando l'inclinazione
+               massima del velivolo era limitata a 25 gradi: con il limite
+               portato a 40 il gimbal arrivava a fondo corsa e smetteva di
+               stabilizzare proprio nelle manovre piu aggressive — misurato,
+               comando al giunto esattamente 0.785 rad e accoppiamento
+               risalito da -0.22 a -0.39. La corsa deve superare
+               l'inclinazione massima del corpo con margine, altrimenti la
+               sospensione protegge solo il volo tranquillo. -->
+          <lower>-1.0472</lower>
+          <upper>1.0472</upper>
           <effort>2.0</effort>
           <velocity>6.0</velocity>
         </limit>
@@ -925,8 +929,8 @@
       <axis>
         <xyz expressed_in="__model__">0 1 0</xyz>
         <limit>
-          <lower>-0.7854</lower>
-          <upper>0.7854</upper>
+          <lower>-1.0472</lower>
+          <upper>1.0472</upper>
           <effort>2.0</effort>
           <velocity>6.0</velocity>
         </limit>
@@ -959,10 +963,11 @@
       <pose>0.1 0 -0.05 0 1.5708 0</pose>
       <sensor name="camera" type="camera">
         <camera>
-          <!-- 90° invece di 60°: a 12 m di quota l'impronta a terra passa da
-               ~14 a ~24 m. Con il campo stretto il bersaglio usciva
-               dall'inquadratura appena il drone si inclinava, e veniva perso
-               dopo mezzo secondo. -->
+          <!-- 90° invece di 60°: l'impronta a terra vale 2 volte la quota
+               invece di 1.15. Alla quota operativa di 50 m sono 100 m di lato,
+               che un bersaglio a 15 m/s attraversa in poco meno di 7 secondi:
+               e il margine che rende inseguibile un veicolo. Con il campo
+               stretto sarebbero 58 m, cioe meno di 4 secondi. -->
           <horizontal_fov>1.5708</horizontal_fov>
           <image>
             <width>640</width>
@@ -971,7 +976,11 @@
           </image>
           <clip>
             <near>0.1</near>
-            <far>100</far>
+            <!-- A 50 m di quota l'angolo di un fotogramma dista 50/cos(51.3) =
+                 80 m: con il limite a 100 m il terreno vi rientrava per un
+                 soffio, e una quota leggermente superiore lo avrebbe fatto
+                 sparire agli angoli. -->
+            <far>200</far>
           </clip>
         </camera>
         <always_on>1</always_on>

@@ -133,15 +133,27 @@ class ControllerNode(Node):
         # Nota: scendere sotto 1.2 e stato provato e peggiora molto (a 0.6 la
         # distanza mediana dal bersaglio passava da 3.5 a 26.7 m): con guadagno
         # basso il drone non tiene il passo.
-        self.kp_x = parametro(self, 'kp_x', 1.2)      # 1/s
-        self.kp_y = parametro(self, 'kp_y', 1.2)
+        # Alzati a 2.0 con lo scenario realistico. Il guadagno era tenuto
+        # basso perche piu aggressivita significava piu inclinazione e quindi
+        # meno campo utile; con la sospensione cardanica quel conflitto non
+        # esiste piu, ed e stato misurato: a 5.5 m/s di fuga, con telecamera
+        # fissa il guadagno 2.0 faceva scendere il rilevamento dal 73% al 53%,
+        # con la sospensione lo faceva salire dal 74% all'81%.
+        # L'errore a regime vale velocita/kp: a 15 m/s sono 7.5 m, entro i 50 m
+        # di semicampo disponibili alla quota operativa.
+        self.kp_x = parametro(self, 'kp_x', 2.0)      # 1/s
+        self.kp_y = parametro(self, 'kp_y', 2.0)
         self.kd_x = parametro(self, 'kd_x', 0.35)
         self.kd_y = parametro(self, 'kd_y', 0.35)
         # Deve superare la velocita del bersaglio, altrimenti il drone non puo
         # recuperare terreno per costruzione. A 3.5 non pareggiava nemmeno gli
         # 8.3 m/s del bersaglio. Il limite e per asse: il modulo diagonale
         # arriva a vel_max*sqrt(2).
-        self.vel_max = parametro(self, 'vel_max', 5.0)
+        # Deve superare la velocita del bersaglio, altrimenti il drone non
+        # puo recuperare terreno per costruzione. Con il bersaglio a 15 m/s,
+        # venti danno il margine necessario a chiudere la distanza invece di
+        # limitarsi a non perderla.
+        self.vel_max = parametro(self, 'vel_max', 20.0)
 
         # Zona morta ampia, in metri. Con 0.3 m il drone correggeva anche errori
         # minimi: con kp alto questo produce inclinazioni continue, e ogni grado
@@ -150,7 +162,10 @@ class ControllerNode(Node):
         # quasi fermo. A 1.5 m il drone ignora gli scarti piccoli e resta piatto
         # quando il bersaglio e sotto di lui, conservando il guadagno alto per
         # quando serve davvero, cioe durante una fuga.
-        self.deadzone = parametro(self, 'deadzone', 1.0)   # metri
+        # Zona morta pari a meta della lunghezza del veicolo: dentro quel
+        # raggio il drone e gia sopra il bersaglio, e correggere ancora
+        # produrrebbe solo inclinazioni inutili.
+        self.deadzone = parametro(self, 'deadzone', 2.0)   # metri
         self.semi_fov_o = 0.7854     # rad, meta del FOV orizzontale (90°)
         self.semi_fov_v = 0.6435     # rad, meta del FOV verticale su 640x480
         # Precalcolate: compaiono in ogni messaggio del tracker, sia nella

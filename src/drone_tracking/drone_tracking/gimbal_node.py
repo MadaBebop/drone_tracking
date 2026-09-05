@@ -14,10 +14,13 @@ l'osservazione. Se l'inclinazione porta il bersaglio fuori dai pixel, nessun
 calcolo lo recupera. Questo nodo agisce invece sulla causa, tenendo l'asse
 ottico fermo rispetto al terreno mentre il corpo ruota.
 
-Il comando e l'opposto dell'assetto misurato, saturato ai limiti del giunto:
-oltre 45 gradi la sospensione entrerebbe nell'inquadratura, e da quel punto il
-residuo torna a carico della compensazione analitica, che continua a esistere
-proprio per questo.
+Il comando e l'opposto dell'assetto misurato, saturato ai limiti del giunto,
+che valgono 60 gradi. La corsa deve superare l'inclinazione massima del corpo
+con margine: quando era di 45 gradi contro i 40 consentiti al velivolo, il
+gimbal arrivava a fondo corsa proprio nelle manovre piu aggressive e smetteva
+di stabilizzare quando piu serviva. Oltre la saturazione il residuo torna a
+carico della compensazione analitica in controller_node, che continua a
+esistere proprio per questo.
 """
 import math
 
@@ -37,7 +40,7 @@ class GimbalNode(Node):
         # Limite meccanico dei giunti, come dichiarato nel modello SDF: il nodo
         # non deve comandare oltre, altrimenti il regolatore inseguirebbe un
         # riferimento irraggiungibile accumulando errore.
-        parametro(self, 'limite_rad', 0.7854)
+        parametro(self, 'limite_rad', 1.0472)
         # Frazione dell'assetto da compensare. A 1.0 la stabilizzazione e
         # completa; valori inferiori servono a misurare quanto conta, senza
         # ricompilare.

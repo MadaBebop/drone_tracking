@@ -3,7 +3,7 @@
 # Sequenza di decollo via servizi MAVROS — equivalente dei comandi
 # manuali in MAVProxy (mode guided / arm throttle / takeoff).
 #
-#   takeoff.sh [quota_metri]     default: 12 (quota di crociera dei waypoint)
+#   takeoff.sh [quota_metri]     default: 50 (quota di crociera dei waypoint)
 #
 # I controlli di arming non si disattivano qui: ARMING_SKIPCHK=1 arriva da
 # docker/sitl-defaults.parm, caricato all'avvio del SITL. Via MAVROS il set
@@ -13,10 +13,28 @@
 #
 set -e
 
-QUOTA="${1:-12.0}"
+QUOTA="${1:-50.0}"
 
 source /opt/ros/jazzy/setup.bash
 [ -f /ws/install/setup.bash ] && source /ws/install/setup.bash
+
+# --- Lettura di un topic, sempre terminante ---------------------------------
+# `ros2 topic echo --once` puo bloccarsi per sempre: se la QoS della
+# sottoscrizione non combacia con quella del publisher resta in attesa di un
+# messaggio che non arrivera mai. E successo davvero, e una prova e rimasta
+# ferma tre ore e quaranta con il drone in volo e nessuno che se ne accorgesse.
+# Il timeout la rende terminante; best_effort combacia con qualunque publisher,
+# affidabile o sensor-like che sia.
+leggi_topic() {
+    local topic="$1" campo="$2" limite="${3:-15}"
+    if [ -n "$campo" ]; then
+        timeout "$limite" ros2 topic echo --once --qos-reliability best_effort \
+            --field "$campo" "$topic" 2>/dev/null | head -1
+    else
+        timeout "$limite" ros2 topic echo --once --qos-reliability best_effort \
+            "$topic" 2>/dev/null
+    fi
+}
 
 # Ogni chiamata va verificata: una risposta success=False è indistinguibile da un
 # successo se si scarta l'output, ed è così che un decollo fallito passa
@@ -36,14 +54,20 @@ chiama() {
 }
 
 echo "→ Attendo che MAVROS sia connesso al SITL..."
-until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "connected: true"; do
+for _ in $(seq 1 60); do
+    leggi_topic /mavros/state "" 10 | grep -q "connected: true" && break
     sleep 1
 done
+if ! leggi_topic /mavros/state "" 10 | grep -q "connected: true"; then
+    echo "   ERRORE: MAVROS non risulta connesso al SITL." >&2
+    echo "   Controlla il pannello 'mavros' e quello 'mavproxy'." >&2
+    exit 1
+fi
 echo "  connesso."
 
 # Un decollo non parte se mission_node sta già pubblicando setpoint di posizione:
 # in GUIDED quel flusso ha la precedenza sul comando di takeoff.
-STATO="$(ros2 topic echo /mission/stato --field data --once 2>/dev/null | head -1 || true)"
+STATO="$(leggi_topic /mission/stato data 10)"
 if [ -n "$STATO" ] && [ "${STATO#ATTESA}" != "$STATO" ]; then
     : # in ATTESA, nessun setpoint in volo: tutto a posto
 elif [ -n "$STATO" ]; then
@@ -80,9 +104,13 @@ chiama "takeoff" /mavros/cmd/takeoff mavros_msgs/srv/CommandTOL \
 
 # Conferma che il drone stia davvero salendo: i servizi possono rispondere
 # success=True e il velivolo restare a terra.
+# La salita a 50 m richiede una decina di secondi simulati, che su una macchina
+# senza accelerazione grafica valgono quaranta secondi di orologio: il limite
+# va tenuto largo, altrimenti il decollo viene dichiarato fallito mentre e
+# ancora in corso.
 echo "→ Verifico la salita..."
-for _ in $(seq 1 30); do
-    ALT="$(ros2 topic echo /mavros/global_position/rel_alt --field data --once 2>/dev/null | head -1)"
+for _ in $(seq 1 60); do
+    ALT="$(leggi_topic /mavros/global_position/rel_alt data 10)"
     if [ -n "$ALT" ] && awk "BEGIN{exit !($ALT > $QUOTA * 0.8)}"; then
         echo "  quota raggiunta: ${ALT} m"
         echo
@@ -93,6 +121,6 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 
-echo "  ATTENZIONE: quota ferma a ${ALT:-?} m dopo 60 s." >&2
+echo "  ATTENZIONE: quota ferma a ${ALT:-?} m dopo 120 s." >&2
 echo "  Controlla il pannello 'mavproxy' per il motivo del rifiuto." >&2
 exit 1

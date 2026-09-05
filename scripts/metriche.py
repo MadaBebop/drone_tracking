@@ -140,6 +140,30 @@ def correlazione(righe, col_a, col_b):
     return num / (da * db)
 
 
+def residuo_telecamera(righe):
+    """Inclinazione residua dell'asse ottico, in gradi: mediana e massimo.
+
+    Vale assetto del corpo piu angolo del giunto. Se la sospensione lavora e
+    zero; se va a fondo corsa cresce, e il massimo lo rivela anche quando la
+    mediana resta nulla. Serve a distinguere una sospensione che funziona da
+    una che satura, distinzione che il solo comando al giunto non permette:
+    un comando al valore limite puo essere il picco di una richiesta
+    soddisfatta oppure una richiesta tosata.
+    """
+    import math as _math
+    residui = []
+    for r in righe:
+        try:
+            roll = float(r['roll']) + float(r['gimbal_roll'])
+            pitch = float(r['pitch']) + float(r['gimbal_pitch'])
+        except (ValueError, KeyError, TypeError):
+            continue
+        residui.append(_math.degrees(max(abs(roll), abs(pitch))))
+    if not residui:
+        return None
+    return median(residui), max(residui)
+
+
 def riassumi(percorso):
     righe = leggi(percorso)
     if not righe:
@@ -167,6 +191,21 @@ def riassumi(percorso):
     print('  sequenza fasi          %s' % ' -> '.join(sequenza_fasi(righe)))
     print('  bersaglio rilevato     %.1f%% dei campioni (detector)' % frazione(righe, 'det_valido'))
     print('  bersaglio tracciato    %.1f%% dei campioni (kalman)' % frazione(righe, 'trk_valido'))
+    # Il denominatore giusto per la visibilita e la fase di aggancio, non la
+    # prova intera: durante l'avvicinamento il bersaglio non e ancora
+    # raggiungibile, e contarlo come "non rilevato" misura la distanza di
+    # partenza invece della qualita dell'inseguimento. Su un circuito da 150 m
+    # quella distinzione vale venti punti percentuali.
+    in_aggancio = [r for r in righe if r.get('fase') == 'AGGANCIO']
+    if in_aggancio:
+        print('    di cui in AGGANCIO    %.1f%% visto, %.1f%% stimato '
+              '(%d campioni)' % (frazione(in_aggancio, 'det_valido'),
+                                 frazione(in_aggancio, 'trk_valido'),
+                                 len(in_aggancio)))
+        d_agg = numeri(in_aggancio, 'dist_xy_gt')
+        if d_agg:
+            print('    distanza in AGGANCIO  mediana %.2f m  media %.2f m  '
+                  'max %.2f' % (median(d_agg), mean(d_agg), max(d_agg)))
     print('  sotto jamming          %.1f%% dei campioni' % frazione(righe, 'jam_attivo'))
     print('  GPS negato             %.1f%% dei campioni' % frazione(righe, 'gps_negato'))
     if dist:
@@ -195,21 +234,38 @@ def riassumi(percorso):
                       etichetta, percentile(v, 0.95),
                       mean(in_moto) if in_moto else 0.0, max(v)))
 
-    # Accoppiamento assetto-immagine: e il difetto che la sospensione
-    # cardanica attacca alla radice, e si legge come correlazione.
+    # Assetto residuo della telecamera: assetto del corpo piu angolo del
+    # giunto, cioe quanto l'asse ottico resta inclinato rispetto al terreno.
+    # E la misura diretta dell'effetto della sospensione, e a differenza della
+    # correlazione qui sotto non e ambigua.
+    residui = residuo_telecamera(righe)
+    if residui:
+        # Solo la mediana e affidabile: assetto e comando al giunto arrivano da
+        # callback diverse e vengono campionati a istanti fino a qualche
+        # decimo di secondo di distanza, quindi durante una manovra aggressiva
+        # il massimo misura lo sfasamento fra i due campionamenti, non un
+        # errore di stabilizzazione. La saturazione si verifica sul comando.
+        print('  residuo telecamera     mediano %.2f gradi' % residui[0])
+    gr = numeri(righe, 'gimbal_roll')
+    if gr:
+        gp = numeri(righe, 'gimbal_pitch') or [0.0]
+        picco = max(max(abs(v) for v in gr), max(abs(v) for v in gp))
+        print('  comando gimbal         picco %.3f rad su limite 1.047 -> %s'
+              % (picco, 'SATURA' if picco > 1.04 else 'entro corsa'))
+
+    # Correlazione fra assetto e posizione del bersaglio nell'immagine.
+    # ATTENZIONE alla lettura: misura un'associazione, non una causa. Con la
+    # telecamera solidale al corpo l'associazione viene dal supporto, ed e la
+    # grandezza che la sospensione deve annullare. Con la sospensione attiva e
+    # il residuo prossimo a zero, invece, l'associazione che resta va nella
+    # direzione opposta — il velivolo si inclina PERCHE il bersaglio e
+    # decentrato — e un valore alto indica un controllo reattivo, non un
+    # difetto. Il residuo qui sopra dice quale delle due letture vale.
     for etichetta, assetto, immagine in (('pitch/det_y', 'pitch', 'det_y'),
                                          ('roll/det_x', 'roll', 'det_x')):
         r = correlazione(righe, assetto, immagine)
         if r is not None:
-            print('  accoppiamento %-10s r = %+.3f' % (etichetta, r))
-
-    gr = numeri(righe, 'gimbal_roll')
-    if gr:
-        gp = numeri(righe, 'gimbal_pitch')
-        print('  comando gimbal         rollio |max| %.3f rad  '
-              'beccheggio |max| %.3f rad' % (
-                  max(abs(v) for v in gr),
-                  max(abs(v) for v in gp) if gp else float('nan')))
+            print('  associazione %-11s r = %+.3f' % (etichetta, r))
 
     ritmo = numeri(righe, 'det_hz')
     if ritmo:
