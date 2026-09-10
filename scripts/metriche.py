@@ -7,6 +7,8 @@ sull'host, senza pandas.
 
     metriche.py riassumi metrics/*.csv        una riga di riepilogo per prova
     metriche.py confronta A.csv B.csv         ripetibilita di due prove gemelle
+    metriche.py ricerche metrics/*.csv        esito di ogni ricerca del bersaglio
+    metriche.py gruppi 'A*.csv' 'B*.csv'      due configurazioni, piu prove ciascuna
 
 Il confronto e il criterio di verifica della Fase 0: due prove con la stessa
 configurazione e lo stesso seme devono dare le stesse fasi nello stesso ordine
@@ -14,6 +16,7 @@ e distanze che differiscono solo per il rumore di scheduling. Se differiscono
 di piu, l'esperimento non e ripetibile e ogni misura successiva vale poco.
 """
 import csv
+import glob
 import sys
 from statistics import mean, median
 
@@ -57,6 +60,235 @@ def tratti(righe, fase):
     if inizio is not None:
         durate.append(float(righe[-1]['t_sim']) - inizio)
     return durate
+
+
+def episodi_ricerca(righe):
+    """Ogni tratto di RICERCA con il suo esito.
+
+    La durata media di una ricerca, da sola, non dice se la ricerca funziona:
+    una ricerca corta puo essere un riaggancio riuscito oppure una prova
+    finita. Cio che distingue le due strategie e l'esito — quante perdite
+    tornano un aggancio — e quanto il velivolo si avvicina davvero al
+    bersaglio mentre lo cerca, che e la grandezza su cui una ricerca
+    direzionale dovrebbe battere una spirale cieca.
+    """
+    episodi = []
+    inizio = None
+    for i, r in enumerate(righe):
+        if r.get('fase') == 'RICERCA':
+            if inizio is None:
+                inizio = i
+        elif inizio is not None:
+            episodi.append((inizio, i - 1, r.get('fase')))
+            inizio = None
+    if inizio is not None:
+        # Nessuna fase successiva: la prova e finita mentre cercava ancora.
+        # Va contato come ricerca non conclusa, non come ricerca lunga.
+        episodi.append((inizio, len(righe) - 1, None))
+    return episodi
+
+
+def descrivi_ricerche(percorso):
+    """Tabella degli episodi di ricerca di una prova. Torna la lista degli
+    episodi come tuple (durata, riagganciato, distanza minima)."""
+    righe = leggi(percorso)
+    if not righe:
+        print('%s: vuoto' % percorso)
+        return []
+
+    fuori = []
+    print('=' * 72)
+    print(percorso)
+    episodi = episodi_ricerca(righe)
+    if not episodi:
+        print('  nessuna ricerca: il bersaglio non e mai stato perso')
+        return []
+
+    print('  %-8s %-8s %-10s %-10s %-5s %s' % (
+        'inizio', 'durata', 'dist_ini', 'dist_min', 'visto', 'esito'))
+    for i, j, dopo in episodi:
+        t0 = float(righe[i]['t_sim'])
+        durata = float(righe[j]['t_sim']) - t0
+        tratto = righe[i:j + 1]
+        d = numeri(tratto, 'dist_xy_gt')
+        d_ini = d[0] if d else float('nan')
+        d_min = min(d) if d else float('nan')
+        # Il ritorno in AGGANCIO scatta su fotogrammi validi del TRACKER, e
+        # quella validita sopravvive sulla predizione: preso da solo, il
+        # conteggio dei riagganci conterebbe come successo anche un filtro che
+        # estrapola nel vuoto. Serve una prova che il bersaglio sia tornato
+        # davanti alla telecamera.
+        #
+        # Il campionamento del rilevatore non basta a fornirla: il rilevatore
+        # pubblica a ~25 Hz e queste metriche campionano a 5, e la colonna
+        # porta lo stato dell'ULTIMO messaggio ricevuto. Un avvistamento di un
+        # solo fotogramma ha quindi una probabilita su cinque di comparire, e
+        # la sua assenza non dimostra nulla.
+        #
+        # La prova sta invece nella semantica del tracker: passata
+        # `soglia_perdita`, il filtro si azzera e pubblica un punto non valido,
+        # e da quel momento puo tornare valido SOLO ricevendo una misura vera.
+        # Una risalita di trk_valido da 0 a 1 e percio un rilevamento
+        # avvenuto, anche quando il campionamento non lo ha visto.
+        visti = sum(1 for r in tratto if r.get('det_valido') == '1')
+        risalita = any(a.get('trk_valido') == '0' and b.get('trk_valido') == '1'
+                       for a, b in zip(tratto, tratto[1:]))
+        riagganciato = (dopo == 'AGGANCIO')
+        confermato = riagganciato and (visti > 0 or risalita)
+        if not riagganciato:
+            esito = 'prova finita' if dopo is None else 'passata a %s' % dopo
+        elif visti > 0:
+            esito = 'riagganciato (visto)'
+        elif risalita:
+            esito = 'riagganciato (risalita del tracker)'
+        else:
+            # Ne un rilevamento campionato ne una risalita: il tracker non e
+            # mai stato invalidato e il riaggancio poggia solo sulla sua
+            # predizione. Non e dimostrato.
+            esito = 'riagganciato NON dimostrato'
+        print('  %-8.1f %-8.1f %-10.1f %-10.1f %-5d %s' % (
+            t0, durata, d_ini, d_min, visti, esito))
+        fuori.append((durata, confermato, d_min, riagganciato, visti))
+
+    confermati = [e for e in fuori if e[1]]
+    dichiarati = [e for e in fuori if e[3]]
+    print('  --> %d ricerche, %d riagganci dichiarati, '
+          '%d con un rilevamento dimostrabile' % (
+              len(fuori), len(dichiarati), len(confermati)))
+    if confermati:
+        print('      tempo di riaggancio mediano %.1f s' % median(
+            [e[0] for e in confermati]))
+    minime = [e[2] for e in fuori if e[2] == e[2]]
+    if minime:
+        print('      avvicinamento massimo durante la ricerca: '
+              'mediana %.1f m, migliore %.1f m' % (median(minime), min(minime)))
+    return fuori
+
+
+def ricerche(percorsi):
+    """Esiti delle ricerche su una o piu prove.
+
+    Piu prove insieme perche a scala reale la dispersione fra prove ripetute e
+    un fattore due-quattro: una prova sola non distingue una strategia
+    migliore dal caso.
+    """
+    tutti = []
+    for percorso in percorsi:
+        tutti.extend(descrivi_ricerche(percorso))
+    if len(percorsi) > 1 and tutti:
+        confermati = [e for e in tutti if e[1]]
+        dichiarati = [e for e in tutti if e[3]]
+        print('=' * 72)
+        print('AGGREGATO su %d prove' % len(percorsi))
+        print('  ricerche totali        %d' % len(tutti))
+        print('  riagganci dichiarati   %d (%.0f%%)' % (
+            len(dichiarati), 100.0 * len(dichiarati) / len(tutti)))
+        print('  con rilevamento dimostrabile %d (%.0f%% delle ricerche)' % (
+            len(confermati), 100.0 * len(confermati) / len(tutti)))
+        if confermati:
+            print('  tempo di riaggancio    mediano %.1f s, medio %.1f s' % (
+                median([e[0] for e in confermati]),
+                mean([e[0] for e in confermati])))
+        minime = [e[2] for e in tutti if e[2] == e[2]]
+        if minime:
+            print('  avvicinamento massimo  mediana %.1f m, migliore %.1f m' % (
+                median(minime), min(minime)))
+    return 0
+
+
+def _indicatori(percorso):
+    """Gli indicatori di una prova, come numeri e senza stampare nulla."""
+    righe = leggi(percorso)
+    if not righe:
+        return None
+    in_aggancio = [r for r in righe if r.get('fase') == 'AGGANCIO']
+    totale = len(righe)
+    d_agg = numeri(in_aggancio, 'dist_xy_gt')
+    episodi = []
+    for i, j, dopo in episodi_ricerca(righe):
+        tratto = righe[i:j + 1]
+        d = numeri(tratto, 'dist_xy_gt')
+        visti = sum(1 for r in tratto if r.get('det_valido') == '1')
+        risalita = any(a.get('trk_valido') == '0' and b.get('trk_valido') == '1'
+                       for a, b in zip(tratto, tratto[1:]))
+        episodi.append({
+            'durata': float(righe[j]['t_sim']) - float(righe[i]['t_sim']),
+            'confermato': dopo == 'AGGANCIO' and (visti > 0 or risalita),
+            'dist_min': min(d) if d else None,
+        })
+    return {
+        'quota_aggancio': 100.0 * len(in_aggancio) / totale if totale else 0.0,
+        'visto_in_aggancio': frazione(in_aggancio, 'det_valido') if in_aggancio else float('nan'),
+        'dist_aggancio': median(d_agg) if d_agg else float('nan'),
+        'agganci': tratti(righe, 'AGGANCIO'),
+        'ricerche': episodi,
+    }
+
+
+def gruppi(pattern_a, pattern_b):
+    """Confronto fra due configurazioni, piu prove ciascuna.
+
+    A scala reale la dispersione fra prove ripetute e un fattore due-quattro
+    sulla durata dell'aggancio: `confronta` fra due prove sole non distingue
+    una configurazione migliore dal caso, e questo comando esiste per non
+    invitare piu a farlo. Le mediane sono sulle prove, non sui campioni: una
+    prova andata male non pesa in proporzione a quanto e andata male.
+    """
+    for etichetta, pattern in (('A', pattern_a), ('B', pattern_b)):
+        if not sorted(glob.glob(pattern)):
+            print('gruppo %s: nessun file per %s' % (etichetta, pattern))
+            return 2
+
+    misure = {}
+    for etichetta, pattern in (('A', pattern_a), ('B', pattern_b)):
+        file = sorted(glob.glob(pattern))
+        prove = [x for x in (_indicatori(f) for f in file) if x]
+        ricerche = [e for p in prove for e in p['ricerche']]
+        confermate = [e for e in ricerche if e['confermato']]
+        minime = [e['dist_min'] for e in ricerche if e['dist_min'] is not None]
+        agganci = [d for p in prove for d in p['agganci']]
+        misure[etichetta] = {
+            'file': file,
+            'prove': len(prove),
+            'tempo in AGGANCIO (%)': median([p['quota_aggancio'] for p in prove]),
+            'visto in AGGANCIO (%)': median([p['visto_in_aggancio'] for p in prove]),
+            'distanza in AGGANCIO (m)': median([p['dist_aggancio'] for p in prove]),
+            'durata aggancio (s)': median(agganci) if agganci else float('nan'),
+            'ricerche (n)': len(ricerche),
+            'riagganciate (%)': (100.0 * len(confermate) / len(ricerche)
+                                 if ricerche else float('nan')),
+            'tempo di riaggancio (s)': (median([e['durata'] for e in confermate])
+                                        if confermate else float('nan')),
+            'distanza minima (m)': median(minime) if minime else float('nan'),
+        }
+
+    print('=' * 72)
+    for etichetta in ('A', 'B'):
+        print('gruppo %s: %d prove' % (etichetta, misure[etichetta]['prove']))
+        for f in misure[etichetta]['file']:
+            print('    %s' % f)
+    print('-' * 72)
+    # Due blocchi, perche le due meta hanno unita diverse e confonderle
+    # sarebbe il modo piu facile di leggere male questa tabella. Sopra, una
+    # mediana sulle prove: la domanda e come va una missione tipica. Sotto,
+    # tutti gli episodi di ricerca messi insieme: la domanda e, dato che il
+    # bersaglio e stato perso, se la ricerca lo ritrova — e una prova che non
+    # perde mai il bersaglio non ha voce in capitolo su quella domanda, ma
+    # peserebbe eccome su una mediana per prova.
+    def blocco(titolo, chiavi):
+        print('  %-28s %10s %10s' % (titolo, 'A', 'B'))
+        for chiave in chiavi:
+            print('  %-28s %10.1f %10.1f' % (chiave, misure['A'][chiave],
+                                             misure['B'][chiave]))
+
+    blocco('mediana sulle prove', (
+        'tempo in AGGANCIO (%)', 'visto in AGGANCIO (%)',
+        'distanza in AGGANCIO (m)', 'durata aggancio (s)'))
+    print('-' * 72)
+    blocco('su tutte le ricerche', (
+        'ricerche (n)', 'riagganciate (%)',
+        'tempo di riaggancio (s)', 'distanza minima (m)'))
+    return 0
 
 
 def sequenza_fasi(righe):
@@ -334,6 +566,13 @@ def main(argv):
         for f in file:
             riassumi(f)
         return 0
+    if comando == 'ricerche':
+        return ricerche(file)
+    if comando == 'gruppi':
+        if len(file) != 2:
+            print('gruppi vuole due pattern, uno per configurazione')
+            return 2
+        return gruppi(file[0], file[1])
     if comando == 'confronta':
         if len(file) != 2:
             print('confronta vuole esattamente due file')

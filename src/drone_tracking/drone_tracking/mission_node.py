@@ -2,6 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point, PoseStamped
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from enum import Enum
@@ -42,6 +43,19 @@ class MissionNode(Node):
             Point, '/target/tracked_position',
             self.on_target, 10)
 
+        # Subscriber: rilevamenti veri, quelli che il tracker riceve in
+        # ingresso. Non `/target/position`: fra i due c'e il jammer, e contare
+        # i rilevamenti puliti farebbe confermare un aggancio su
+        # un'informazione che il filtro non ha mai avuto.
+        self.create_subscription(
+            Point, '/target/jammed_position', self.on_rilevamento, 10)
+
+        # Subscriber: stima del bersaglio in metri, pubblicata dal controllo.
+        # E cio che rende possibile cercare nella direzione giusta invece che
+        # a spirale isotropa.
+        self.create_subscription(
+            Odometry, '/target/odometria', self.on_stima_bersaglio, 10)
+
         # Publisher: waypoint verso MAVROS2
         self.waypoint_pub = self.create_publisher(
             PoseStamped, '/mavros/setpoint_position/local', 10)
@@ -78,6 +92,9 @@ class MissionNode(Node):
         # restava congelata in AGGANCIO a tempo indeterminato.
         self.istante_ultimo_target = None
         self.istante_ultima_posa   = None
+        # Ultima stima nota del bersaglio nel mondo: (x, y, vx, vy, istante).
+        # Sopravvive alla perdita dell'aggancio, ed e proprio allora che serve.
+        self.stima_bersaglio = None
         self.timeout_percezione_s = parametro(
             self, 'timeout_percezione_s', 0.5)   # ~5 messaggi al ritmo camera
         self.timeout_telemetria_s = parametro(
@@ -102,7 +119,12 @@ class MissionNode(Node):
         # l'alternativa e continuare a cercare a vuoto.
         self.frame_conferma_riaggancio = parametro(
             self, 'frame_conferma_riaggancio', 2)
-        self.frame_bersaglio_visibile = 0
+        # Rilevamenti consecutivi, contati sul flusso del rilevatore e non su
+        # quello del filtro. Sono due grandezze diverse e vanno tenute
+        # separate: il filtro resta valido per `soglia_perdita` fotogrammi
+        # dopo l'ultima misura, quindi un solo avvistamento ne produce
+        # abbastanza da soddisfare qualunque soglia di conferma.
+        self.rilevamenti_consecutivi = 0
         
         self.timer = self.create_timer(0.5, self.aggiorna_missione)
         self.get_logger().info('MissionNode avviato — in attesa di arming')
@@ -139,6 +161,32 @@ class MissionNode(Node):
         self.ricerca_raggio_max = parametro(
             self, 'ricerca_raggio_max', 300.0)     # m, poi si rinuncia
         self.ricerca_ultimo_istante = None
+        # Prima di aprire la spirale si potrebbe volare dove il bersaglio
+        # sarebbe se avesse proseguito, estrapolando dalla sua velocita
+        # stimata. Il default e zero, cioe spento, e il motivo e misurato:
+        # su 18 prove e 5426 campioni l'errore mediano di quella stima vale
+        # 10.8 m/s contro un bersaglio che viaggia a 10.0. L'errore e grande
+        # quanto il segnale, e da una grandezza cosi non si ricava una
+        # direzione: in una prova il drone ha volato 80 secondi nel verso
+        # opposto alla fuga. I presidi sul valore (mediana, limite fisico,
+        # memoria) impediscono il disastro ma non creano informazione.
+        #
+        # Il termine resta parametrico perche il difetto e a monte e ha una
+        # soluzione nota: dare al filtro la velocita del velivolo come ingresso
+        # noto, cosi che stimi la velocita assoluta del bersaglio invece di
+        # ricavarla per differenza da un'immagine dove i due moti sono
+        # sovrapposti. Migliorata la stima, questo torna acceso senza altre
+        # modifiche. Un valore ragionevole e 8.0 s: a 15 m/s sono 120 m, oltre
+        # i quali l'estrapolazione rettilinea decade comunque perche un veicolo
+        # in fuga curva.
+        #
+        # Cio che invece resta ACCESO e l'altra meta della modifica: il centro
+        # della ricerca sull'ultima posizione nota del bersaglio anziche del
+        # drone. Quella non dipende dalla velocita, e la posizione e stimata
+        # bene.
+        self.durata_inseguimento_cieco_s = parametro(
+            self, 'durata_inseguimento_cieco_s', 0.0)
+        self.istante_inizio_ricerca = None
         # Attesa prima di dichiarare perso il bersaglio, in SECONDI. Era un
         # conteggio di frame tarato su 10 Hz, ma /target/tracked_position segue
         # il ritmo della telecamera (5-13 Hz): la stessa soglia valeva fra 1.5 e
@@ -158,6 +206,33 @@ class MissionNode(Node):
         # mezzo secondo di margine.
         self.soglia_avvia_ricerca_s = parametro(
             self, 'soglia_avvia_ricerca_s', 3.0)
+
+    def on_rilevamento(self, msg: Point):
+        """Rilevamenti consecutivi del bersaglio.
+
+        La convenzione del rilevatore e l'area: z a zero significa che non ha
+        trovato nulla. Si guarda quella e non x/y, perche un bersaglio
+        esattamente al centro dell'inquadratura ha x = y = 0 pur essendo
+        perfettamente visibile.
+        """
+        if msg.z != 0.0:
+            self.rilevamenti_consecutivi += 1
+        else:
+            self.rilevamenti_consecutivi = 0
+
+    def on_stima_bersaglio(self, msg: Odometry):
+        p = msg.pose.pose.position
+        v = msg.twist.twist.linear
+        # La bandiera dice se la velocita e ricostruita o solo zero: senza,
+        # l'inseguimento cieco volerebbe verso l'ultima posizione nota invece
+        # che verso dove il bersaglio sta andando, che e la stessa cosa che
+        # faceva la spirale.
+        velocita_valida = msg.twist.covariance[0] > 0.5
+        self.stima_bersaglio = (
+            p.x, p.y,
+            v.x if velocita_valida else 0.0,
+            v.y if velocita_valida else 0.0,
+            self.get_clock().now().nanoseconds / 1e9)
 
     def on_position(self, msg: PoseStamped):
         self.istante_ultima_posa = self.get_clock().now().nanoseconds / 1e9
@@ -190,17 +265,32 @@ class MissionNode(Node):
         if self.istante_perdita is None:
             self.istante_perdita = adesso
         elif adesso - self.istante_perdita > self.soglia_avvia_ricerca_s:
-            self.get_logger().warn('Bersaglio perso — avvio ricerca')
-            if self.posizione_attuale:
+            # Il centro della ricerca e l'ultima posizione nota del
+            # BERSAGLIO, non quella del drone: a velocita reali le due
+            # differiscono di decine di metri, e cercare attorno a se stessi
+            # significa cercare dove il bersaglio non e.
+            if self.stima_bersaglio is not None:
+                self.ricerca_centro_x = self.stima_bersaglio[0]
+                self.ricerca_centro_y = self.stima_bersaglio[1]
+                self.get_logger().warn(
+                    'Bersaglio perso — ricerca da ({:.0f}, {:.0f}) '
+                    'con velocita ({:+.1f}, {:+.1f}) m/s'.format(
+                        self.stima_bersaglio[0], self.stima_bersaglio[1],
+                        self.stima_bersaglio[2], self.stima_bersaglio[3]))
+            elif self.posizione_attuale:
                 self.ricerca_centro_x = self.posizione_attuale.x
                 self.ricerca_centro_y = self.posizione_attuale.y
+                self.get_logger().warn(
+                    'Bersaglio perso — nessuna stima disponibile, '
+                    'ricerca attorno alla posizione del drone')
+            self.istante_inizio_ricerca = adesso
             self.ricerca_t = 0.0
             self.ricerca_espansione = 0.0
             self.ricerca_ultimo_istante = None
             self.fase = FaseMissione.RICERCA
             self.bersaglio_agganciato = False
             self.istante_perdita = None
-            self.frame_bersaglio_visibile = 0
+            self.rilevamenti_consecutivi = 0
 
     def on_target(self, msg: Point):
         self.istante_ultimo_target = self.get_clock().now().nanoseconds / 1e9
@@ -214,30 +304,31 @@ class MissionNode(Node):
             self._valuta_perdita_aggancio(target_visibile)
             return
 
-        # Gestione riaggancio in fase RICERCA
+        # Gestione riaggancio in fase RICERCA. La condizione e sui
+        # RILEVAMENTI consecutivi: `target_visibile` qui sarebbe vero anche
+        # per una predizione, e un lampo di un fotogramma ne genera a
+        # sufficienza per qualunque soglia.
         if self.fase == FaseMissione.RICERCA:
-            if target_visibile:
-                self.frame_bersaglio_visibile += 1
-                if self.frame_bersaglio_visibile >= self.frame_conferma_riaggancio:
-                    self.get_logger().warn('Bersaglio riagganciato')
-                    self.bersaglio_agganciato = True
-                    self.istante_perdita = None
-                    self.fase = FaseMissione.AGGANCIO
-            else:
-                self.frame_bersaglio_visibile = 0
+            if self.rilevamenti_consecutivi >= self.frame_conferma_riaggancio:
+                self.get_logger().warn(
+                    'Bersaglio riagganciato ({} rilevamenti consecutivi)'.format(
+                        self.rilevamenti_consecutivi))
+                self.bersaglio_agganciato = True
+                self.istante_perdita = None
+                self.fase = FaseMissione.AGGANCIO
             return
 
         # Logica pattugliamento esistente
         if not (in_pattugliamento and altitudine_ok and self.rilevamento_attivo):
-            self.frame_bersaglio_visibile = 0
+            self.rilevamenti_consecutivi = 0
             return
 
-        if target_visibile:
-            self.frame_bersaglio_visibile += 1
-        else:
-            self.frame_bersaglio_visibile = 0
-
-        if (self.frame_bersaglio_visibile >= self.frame_conferma_richiesti
+        # Stesso criterio dell'aggancio iniziale: entrare in inseguimento
+        # richiede di aver visto il bersaglio, non di averlo predetto. Qui il
+        # difetto non si manifestava — sopra il bersaglio i rilevamenti sono
+        # continui — ma il criterio sbagliato era lo stesso, e due criteri
+        # diversi per la stessa decisione sono un difetto in attesa.
+        if (self.rilevamenti_consecutivi >= self.frame_conferma_richiesti
                 and not self.bersaglio_agganciato):
             self.bersaglio_agganciato = True
             self.fase = FaseMissione.AGGANCIO
@@ -347,8 +438,32 @@ class MissionNode(Node):
             self.avvia_pattugliamento()
 
     def esegui_ricerca(self):
-        # Spirale espandibile intorno all'ultima posizione nota
         adesso = self.get_clock().now().nanoseconds / 1e9
+        quota = self.waypoints[1][2]
+
+        # --- Primo tempo: inseguimento cieco ---
+        # Si vola dove il bersaglio sarebbe se avesse proseguito dritto. E
+        # l'unica informazione direzionale disponibile, e a velocita reali vale
+        # piu di qualunque strategia di copertura: la spirale si espande a
+        # pochi metri al secondo mentre il bersaglio ne percorre quindici.
+        if (self.stima_bersaglio is not None
+                and self.istante_inizio_ricerca is not None
+                and adesso - self.istante_inizio_ricerca
+                < self.durata_inseguimento_cieco_s):
+            x0, y0, vx, vy, t0 = self.stima_bersaglio
+            trascorso = adesso - t0
+            x = x0 + vx * trascorso
+            y = y0 + vy * trascorso
+            # La spirale, se servira, partira da qui e non dal punto di
+            # perdita.
+            self.ricerca_centro_x, self.ricerca_centro_y = x, y
+            self.pubblica_waypoint((x, y, quota))
+            self.get_logger().info(
+                'RICERCA inseguimento cieco -> ({:.0f}, {:.0f}) '
+                'da {:.1f}s'.format(x, y, adesso - self.istante_inizio_ricerca))
+            return
+
+        # --- Secondo tempo: spirale attorno alla posizione estrapolata ---
         if self.ricerca_ultimo_istante is None:
             dt = 0.5
         else:
@@ -372,14 +487,13 @@ class MissionNode(Node):
             self.ricerca_espansione = 0.0
             self.ricerca_t = 0.0
             self.ricerca_ultimo_istante = None
-            self.frame_bersaglio_visibile = 0
+            self.rilevamenti_consecutivi = 0
             return
 
         x = self.ricerca_centro_x + raggio_corrente * math.cos(self.ricerca_t)
         y = self.ricerca_centro_y + raggio_corrente * math.sin(self.ricerca_t)
-        z = self.waypoints[1][2]  # mantieni altitudine di crociera
 
-        self.pubblica_waypoint((x, y, z))
+        self.pubblica_waypoint((x, y, quota))
         self.get_logger().info(
             f'RICERCA spirale -> ({x:.1f}, {y:.1f}) raggio:{raggio_corrente:.1f}m')
 

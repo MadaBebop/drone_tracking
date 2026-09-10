@@ -246,9 +246,10 @@ snapshot.sh 10 /drone/camera/image_raw
 
 **7. Aggancio ed evasione**
 
-Quando il drone arriva sul waypoint `(20, 20)` e conferma il bersaglio per 5
-frame, lo stato passa ad `AGGANCIO`. Cinque secondi dopo il bersaglio inizia la
-fuga, e se il drone lo perde per ~2 s lo stato diventa `RICERCA` con la spirale.
+Quando il drone arriva sul waypoint `(150, 150)` e conferma il bersaglio per 5
+rilevamenti consecutivi, lo stato passa ad `AGGANCIO`. Dieci secondi dopo il
+bersaglio inizia la fuga a 15 m/s, e se il drone lo perde lo stato diventa
+`RICERCA`: prima l'inseguimento nella direzione di fuga, poi la spirale.
 Per seguire tutte le transizioni:
 
 ```bash
@@ -332,29 +333,47 @@ Macchina a stati che governa l'intera missione. La fase corrente è pubblicata s
 | `ATTESA` | Drone a terra. Il detector non rileva, il tracker resta azzerato. |
 | `PATTUGLIAMENTO` | Percorre i waypoint pubblicando su `/mavros/setpoint_position/local`. Il rilevamento si attiva 2 s dopo l'avvio, per dare tempo al decollo. |
 | `AGGANCIO` | Bersaglio confermato: il controllo passa a `controller_node`. |
-| `RICERCA` | Bersaglio perso: spirale espandibile attorno all'ultima posizione nota. |
+| `RICERCA` | Bersaglio perso: inseguimento nella direzione di fuga, poi spirale. |
 
-**Percorso di pattugliamento** — circuito quadrato a 12 m di quota, con soglia
+**Percorso di pattugliamento** — circuito quadrato a 50 m di quota, con soglia
 di raggiungimento pari al parametro `soglia_waypoint`:
 
 ```
-(0,0) → (20,0) → (20,20) → (0,20) → (0,0)
+(0,0) → (150,0) → (150,150) → (0,150) → (0,0)
 ```
 
-Il vertice `(20,20)` coincide con la zona in cui orbita il bersaglio. Se il giro
-si chiude senza aggancio, il pattugliamento riparte dal waypoint 1.
+Il vertice `(150,150)` coincide con la zona in cui orbita il bersaglio. Se il
+giro si chiude senza aggancio, il pattugliamento riparte dal waypoint 1.
 
-**Aggancio** — richiede `frame_conferma_richiesti` messaggi consecutivi con
-bersaglio visibile, e solo sopra i 2 m di quota, per evitare falsi positivi
-durante il decollo.
+**Aggancio** — richiede `frame_conferma_richiesti` **rilevamenti** consecutivi,
+e solo sopra i 2 m di quota, per evitare falsi positivi durante il decollo. Sono
+rilevamenti e non messaggi validi del tracker: quest'ultimo resta valido per
+`soglia_perdita` fotogrammi dopo l'ultima misura, quindi un solo avvistamento ne
+produrrebbe abbastanza da soddisfare qualunque soglia di conferma. Il conteggio
+è sul flusso a valle del jammer, lo stesso che il filtro riceve in ingresso:
+contare i rilevamenti puliti farebbe confermare un aggancio su un'informazione
+che il filtro non ha mai avuto.
 
 **Perdita e ricerca** — trascorso `soglia_avvia_ricerca_s` senza bersaglio in
-`AGGANCIO`, la fase passa a `RICERCA`: il drone descrive una spirale attorno
-alla propria posizione al momento della perdita, con raggio iniziale 3 m che
-cresce di `ricerca_vel_espansione` al secondo fino a `ricerca_raggio_max`, oltre
-il quale la ricerca è dichiarata fallita e la missione torna a
-`PATTUGLIAMENTO`. Bastano `frame_conferma_riaggancio` messaggi consecutivi di
-nuova visibilità per tornare in `AGGANCIO`.
+`AGGANCIO`, la fase passa a `RICERCA`, che si svolge in due tempi.
+
+Nel primo il drone vola dove il bersaglio sarebbe se avesse proseguito dritto,
+estrapolando dalla posizione e dalla velocità che `controller_node` pubblica su
+`/target/odometria`. Dura `durata_inseguimento_cieco_s`. È il tempo in cui si
+usa l'unica informazione direzionale disponibile, e a velocità reali vale più di
+qualunque strategia di copertura: la spirale si espande di pochi metri al
+secondo mentre un veicolo in fuga ne percorre quindici.
+
+Nel secondo si apre la spirale, **centrata sulla posizione extrapolata del
+bersaglio e non su quella del drone** — a queste velocità le due differiscono di
+decine di metri, e cercare attorno a sé significa cercare dove il bersaglio non
+è. Il raggio parte da `ricerca_raggio` e cresce di `ricerca_vel_espansione` al
+secondo fino a `ricerca_raggio_max`, oltre il quale la ricerca è dichiarata
+fallita e la missione torna a `PATTUGLIAMENTO`.
+
+Per tornare in `AGGANCIO` servono `frame_conferma_riaggancio` rilevamenti
+consecutivi. Anche qui rilevamenti e non messaggi del tracker, e per un motivo
+misurato: si veda la sezione sulla ricerca direzionale.
 
 Il conteggio della perdita avviene sia all'arrivo dei messaggi del tracker sia
 nel timer periodico: se `/target/tracked_position` tace del tutto — detector
@@ -507,10 +526,15 @@ attivo durante una prova.
 
 | Parametro | Default | Unità |
 |---|---|---|
-| `kp_x`, `kp_y` | 1.2 | 1/s |
+| `kp_x`, `kp_y` | 2.0 | 1/s |
 | `kd_x`, `kd_y` | 0.35 | — |
-| `vel_max` | 5.0 | m/s (per asse) |
-| `deadzone` | 1.0 | metri |
+| `vel_max` | 20.0 | m/s (per asse) |
+| `deadzone` | 2.0 | metri |
+| `k_anticipo` | 0.0 | — (misurato, non conviene) |
+| `finestra_velocita_s` | 1.0 | s (mediana della velocita stimata) |
+| `campioni_velocita_min` | 5 | campioni sotto i quali la stima si disattiva |
+| `vel_bersaglio_max` | 25.0 | m/s — limite fisico, non una taratura |
+| `validita_velocita_s` | 2.0 | s per cui l'ultima velocita nota resta usabile |
 | `durata_coasting_s` | 2.0 | s |
 | `timeout_percezione_s` | 0.5 | s |
 | `timeout_posa_s` / `timeout_quota_s` | 1.0 / 2.0 | s |
@@ -674,20 +698,28 @@ e sopra 1 m di quota.
 
 ### target_mover_node
 
-Muove la sfera rossa in Gazebo comandandone la posa tramite il servizio
+Muove il bersaglio in Gazebo — un parallelepipedo rosso di 4.0 × 2.0 × 1.6 m,
+le dimensioni di un veicolo leggero — comandandone la posa tramite il servizio
 `set_pose`, con due comportamenti:
 
 | Fase | Comportamento | Velocità |
 |---|---|---|
-| `PATTUGLIO` | Orbita circolare attorno a `(20, 20)`, raggio `raggio_orbita` | `velocita_angolare` (0.35 rad/s ≈ **1.05 m/s**) |
+| `PATTUGLIO` | Orbita circolare attorno a `(150, 150)`, raggio `raggio_orbita` (40 m) | `velocita_angolare` (0.25 rad/s ≈ **10 m/s**, 36 km/h) |
 | `EVASIONE` | Fuga in linea retta opposta al drone, per `durata_evasione_s` | `vel_evasione` a regime, raggiunta con rampa `accel_evasione` |
 
-**Perché queste velocità.** Il limite non è la velocità massima del drone, che
-arriva a 8 m/s, ma l'**errore a regime** del controllo proporzionale: inseguendo
-un bersaglio a velocità costante, l'errore d'immagine si stabilizza intorno a
-`velocità_bersaglio / kp`. La tabella seguente è stata misurata con `kp = 4.0`,
-valore di una taratura precedente su coordinate normalizzate (il default attuale
-è 1.2 e agisce su metri):
+**Valori attuali.** La fuga è a `vel_evasione` = 15 m/s, cioè 54 km/h, raggiunti
+con una rampa di 3 m/s²: cinque secondi per il regime, come un mezzo leggero su
+sterrato. Dura `durata_evasione_s` = 20 s, che a quella velocità porta il
+bersaglio a circa 260 m dal punto di partenza — molto più del semicampo
+inquadrato, quindi la fuga mette davvero alla prova l'inseguimento invece di
+svolgersi tutta dentro una sola inquadratura.
+
+**Perché il limite non è la velocità del drone.** Il vincolo è l'**errore a
+regime** del controllo proporzionale: inseguendo un bersaglio a velocità
+costante, l'errore d'immagine si stabilizza intorno a `velocità_bersaglio / kp`.
+La tabella seguente appartiene allo scenario precedente — orbita da 3 m a passo
+d'uomo, quota 12 m, `kp = 4.0` su coordinate normalizzate — e resta qui perché
+il ragionamento vale ancora, non i numeri:
 
 | Velocità bersaglio | Errore a regime | Esito |
 |---|---|---|
@@ -978,6 +1010,252 @@ progetto dichiarava senza prove.
 
 ---
 
+## Ricerca del bersaglio: cosa dicono le misure
+
+La spirale funzionava contro un bersaglio a passo d'uomo e non poteva
+funzionare contro un veicolo. Il motivo è aritmetico prima che sperimentale: si
+espande di pochi metri al secondo attorno al punto di perdita mentre il
+bersaglio se ne allontana a quindici, quindi non lo raggiungerà mai, qualunque
+sia il raggio massimo.
+
+**La misura di partenza.** Cinque prove a scala reale, con la spirale isotropa
+centrata sulla posizione del drone:
+
+| Prova | Esito della ricerca | Distanza iniziale → minima |
+|---|---|---|
+| `reale_kp2p0` | riagganciato dopo 32.2 s | 128 → 44 m |
+| `reale_ff1p0` | fallita | 155 → 100 m |
+| `reale_kp4p0` | fallita | 114 → **114** m |
+| `reale_ff0p0` | fallita | 110 → **110** m |
+| `scenario_50m` | fallita | 106 → **106** m |
+
+Una su cinque, e in tre casi la distanza minima **coincide con quella
+iniziale**: durante l'intera ricerca il drone non si è avvicinato nemmeno di un
+metro. In `reale_ff0p0` è passata da 110 a 221 m con un massimo di 302: la
+spirale portava il drone via dal bersaglio. L'unico successo non smentisce il
+ragionamento, lo conferma — arriva quando la fuga è finita e il bersaglio ha
+ripreso l'orbita, cioè quando ha smesso di allontanarsi.
+
+**I numeri che dicono cosa serviva.** Due grandezze misurate delimitano il
+problema. Alla dichiarazione di perdita il bersaglio è già a **106-155 m**, non
+a pochi metri: la fase `AGGANCIO` sopravvive per inerzia — coasting del
+controllo più predizione del filtro — mentre il bersaglio è fuori inquadratura
+da un pezzo, e l'ultimo campione in `AGGANCIO` risulta a 107 m. In ricerca il
+drone vola però a **20 m/s**, saturando `WP_SPD`, contro un bersaglio a 10-15:
+il margine di recupero esiste, vale 5-10 m/s, e la spirale lo spende girando in
+tondo. Poiché a 50 m di quota l'impronta a terra è larga 100 m, per rivedere il
+bersaglio basta scendere sotto i ~40 m di distanza, cioè recuperarne 70: sono
+sette-quattordici secondi di inseguimento nella direzione giusta.
+
+**La modifica.** La ricerca diventa in due tempi. Nel primo il drone vola dove
+il bersaglio sarebbe se avesse proseguito, estrapolando dalla posizione e dalla
+velocità che `controller_node` pubblica su `/target/odometria`; nel secondo si
+apre la spirale attorno al punto extrapolato invece che attorno al luogo della
+perdita. La conversione da coordinate immagine a metri la pubblica il controllo
+e non la rifà la missione: è la stessa formula, e due copie della stessa formula
+divergono al primo che ne corregge una sola.
+
+Anticipando la conclusione, perché le misure che seguono si leggano sapendo
+dove portano: delle due metà, **il centro della ricerca sul bersaglio resta
+acceso e l'estrapolazione no**. La prima non dipende dalla velocità stimata, la
+seconda sì, e quella stima non è all'altezza — `durata_inseguimento_cieco_s`
+vale quindi `0.0` per default. Il perché è quantificato più sotto.
+
+Misurata su tre prove per configurazione, alternate, contro la stessa spirale
+centrata però sulla posizione del bersaglio — quindi il confronto isola
+l'estrapolazione, non l'intera modifica:
+
+| Su tutti gli episodi di ricerca | direzionale | spirale |
+|---|---|---|
+| Riagganci | 75% | 60% |
+| Tempo di riaggancio, mediano | **4.8 s** | 23.2 s |
+
+Cinque volte più in fretta. E il contatto è reale: nei fotogrammi in cui il
+bersaglio ricompare, le sue coordinate immagine valgono (-0.82, -0.89) e
+(+0.73, -0.95), cioè gli **angoli** dell'inquadratura, a 78 e 65 m di distanza.
+La geometria torna senza ipotesi aggiuntive: l'angolo del fotogramma cade a
+√(50² + 37.5²) = 62.5 m, e ai due istanti il velivolo è inclinato di 0.26 e
+0.32 rad, che spostano l'impronta di 50·tan(0.32) ≈ 17 m.
+
+### Il difetto che la ricerca direzionale ha portato alla luce
+
+Arrivare vicino al bersaglio ha però reso osservabile un difetto che prima non
+aveva occasione di manifestarsi, e che rendeva il successo apparente.
+Separando gli agganci iniziali da quelli riconquistati dopo una ricerca:
+
+| | durata mediana | fotogrammi con bersaglio visto |
+|---|---|---|
+| Ricerca direzionale, aggancio iniziale | 105 s | 64.7% |
+| Ricerca direzionale, dopo una ricerca | **4.4 s** | **0.0%** |
+| Spirale, dopo una ricerca | 24.2 s | 64.8% |
+
+Tutti e tre i riagganci del braccio direzionale erano ciechi: il rilevatore non
+vedeva il bersaglio in nessun campione, e l'aggancio si sfaldava in quattro
+secondi. Il meccanismo: il bersaglio compare per uno o due fotogrammi
+nell'angolo dell'inquadratura, quel lampo resuscita il filtro, che da quel
+momento pubblica predizioni valide per `soglia_perdita` fotogrammi; la missione
+ne contava due e dichiarava il riaggancio. Per tutta la durata del finto
+aggancio la missione **smetteva di cercare**, affidandosi a un controllo visivo
+senza immagine: il finto riaggancio costava più di quanto valesse.
+
+Il difetto non era nella ricerca ma nel criterio che la interrompe. Ora
+l'ingresso in `AGGANCIO` richiede rilevamenti veri e consecutivi, contati sul
+flusso a valle del jammer; restare in `AGGANCIO` può invece poggiare sulla
+predizione. L'asimmetria è voluta: la predizione serve a superare le
+micro-interruzioni di un inseguimento in corso, non a crearne uno.
+
+| A parità di tutto il resto | criterio vecchio | criterio corretto |
+|---|---|---|
+| Fotogrammi con bersaglio visto in `AGGANCIO` | 64.7% | **70.1%** |
+| Distanza mediana in `AGGANCIO` | 41.7 m | **24.2 m** |
+| Durata mediana dell'aggancio | 19.4 s | **47.3 s** |
+| Riagganci dichiarati | 75% | 33% |
+| Agganci riconquistati | 3, da 4-9 s, visto 0.0% | 1, da 20.2 s, visto 54.9% |
+
+I finti agganci sono spariti. Il calo dei riagganci dal 75% al 33% è il prezzo
+apparente di quel 75%, che contava tre successi che non erano successi;
+migliorano invece le grandezze che non dipendono dal conteggio, perché non ci
+sono più episodi da quattro secondi a inquinare le mediane.
+
+### Il secondo difetto: una stima di velocità non validata
+
+Con il criterio corretto è emerso il limite vero. In una prova la ricerca è
+durata 79.8 s partendo da 151.7 m con distanza minima **esattamente** quella
+iniziale, e il log dice perché:
+
+```
+Bersaglio perso — ricerca da (205, 177) con velocita (-7.7, -12.8) m/s
+RICERCA inseguimento cieco -> (179, 134) ... -> (141, 70)
+```
+
+Il bersaglio vero era a (340, 250) e si allontanava verso nord-est. Il drone ha
+volato verso sud-ovest.
+
+La causa non è un errore di segno. Nei fotogrammi che precedono ogni perdita la
+posizione del bersaglio nell'immagine oscilla da un bordo all'altro — il
+velivolo manovra e il bersaglio è al margine — e la velocità istantanea del
+filtro fotografa quell'oscillazione. È la stessa debolezza già misurata quando
+il termine di anticipo è stato provato, dove la stima correla 0.6 con il vero;
+lì costava rumore nel comando, qui costa la direzione della ricerca.
+
+Il dato che ha trasformato l'ipotesi in diagnosi sono le quattordici stime
+registrate in una giornata di prove: tre valevano **41, 33 e 76 m/s**, contro un
+bersaglio che non può superare i 15 imposti dal simulatore. Non stime rumorose:
+stime **impossibili**, accettate senza controllo. Settantasei metri al secondo
+estrapolati per otto secondi mandano il punto di ricerca a seicento metri dal
+vero.
+
+Quattro presidi, nessuno dei quali una taratura — e il quarto esiste perché il terzo, da solo, peggiorava le cose:
+
+- **mediana su una finestra recente** (`finestra_velocita_s`) invece di un
+  singolo campione: una direzione che si inverte fra un fotogramma e il
+  successivo non sopravvive alla mediana, un moto vero sì;
+- **limite fisico** (`vel_bersaglio_max`, 25 m/s cioè 90 km/h per un veicolo
+  terrestre): una stima che lo supera viene **rifiutata**, non troncata. Un
+  valore impossibile non significa «circa quello», significa «non lo so», e
+  chi lo usa deve poterlo sapere. Senza velocità ricostruibile la ricerca non
+  estrapola: vola all'ultima posizione nota e apre la spirale lì, che è la
+  degradazione controllata;
+- **la velocità predetta non è una misura.** Il filtro pubblicava come valida
+  anche la velocità durante la predizione, dove lo stato resta congelato
+  all'ultimo valore: la finestra si riempiva di copie dello stesso numero
+  proprio nei fotogrammi che precedono la perdita, e la mediana di quindici
+  copie di un valore è quel valore. La posizione predetta resta valida — è
+  quella che tollera le micro-interruzioni — la velocità no;
+- **ma una velocità stabilita da misure vere non diventa ignota appena le
+  misure cessano.** Il presidio precedente, da solo, ha prodotto l'effetto
+  opposto a quello voluto, e la prima prova lo ha mostrato subito: escluse le
+  predizioni, negli ultimi fotogrammi entrano solo campioni di misure vere, la
+  finestra da un secondo scende sotto il minimo di cinque — il rilevatore in
+  fuga cala fino a 10 Hz, e 0.4 s a 10 Hz sono quattro campioni — e la velocità
+  pubblicata alla perdita valeva `(+0.0, +0.0)`. La ricerca smetteva di
+  estrapolare e volava all'ultima posizione nota, cioè la degradazione
+  controllata invece della funzione. Lo sbaglio non era escludere le
+  predizioni: era dedurne che la velocità fosse sconosciuta, quando era
+  conosciuta mezzo secondo prima. Ora l'ultimo valore ben stabilito resta
+  utilizzabile per `validita_velocita_s`, dopo il quale torna ignoto davvero.
+  Il valore ricordato non viene mai sostituito da una stima fuori dal limite
+  fisico: una misura impossibile non deve poter scacciare una buona.
+
+**Quanto vale davvero quella stima.** Il sospetto naturale, davanti a mediane
+stabilmente sopra il limite fisico, è un errore sistematico: se la velocità del
+velivolo fosse sommata con il segno sbagliato si otterrebbe la somma dei moduli
+invece della differenza. La verifica contro la verità a terra lo esclude —
+l'errore mediano vale 9.3 m/s con la somma e 31.3 m/s con la differenza, quindi
+il segno è quello giusto — ma nel farlo produce il numero che decide l'intera
+questione.
+
+Su **18 prove e 5426 campioni**, l'errore mediano della velocità ricostruita
+vale **10.8 m/s**, contro un bersaglio che viaggia a **10.0 m/s**. Ogni singola
+prova concorda, da 7.4 a 20.8 m/s. L'errore è grande quanto il segnale.
+
+Da una grandezza così non si ricava una direzione, e nessun filtraggio a valle
+può cambiarlo: mediana, limite fisico e memoria impediscono il disastro, non
+creano l'informazione che manca. È il motivo per cui
+`durata_inseguimento_cieco_s` è spento per default, con la stessa logica con cui
+`k_anticipo` vale zero — misurato, non conveniente, lasciato parametrico con la
+ragione scritta accanto. Migliorata la stima, si riaccende senza altre
+modifiche.
+
+L'effetto del limite fisico è comunque categorico prima che statistico:
+**nessuna ricerca vola più nella direzione sbagliata.** Con il limite attivo tutte e
+quattro le ricerche hanno chiuso distanza — 25, 83, 0 e 49 m recuperati —
+mentre senza, una era andata da 151.7 a 151.7 m con il drone a 250 m dalla
+parte opposta.
+
+| A parità di tutto il resto | senza limite | con limite |
+|---|---|---|
+| Riagganci | 33% | 50% |
+| Tempo di riaggancio, mediano | 13.8 s | 5.3 s |
+| Distanza minima in ricerca | 81.8 m | 64.2 m |
+| Ricerche che si sono avvicinate | 2 su 3 | **4 su 4** |
+
+### Quanto di tutto questo è dimostrato
+
+Le differenze sulle grandezze d'esito — percentuali di riaggancio, tempo in
+`AGGANCIO`, durata degli agganci — sono **dentro la dispersione** misurata a
+questa scala e non vanno lette come risultati: con tre prove per configurazione
+e un fattore due-quattro fra prove identiche, tabelle di questo tipo mostrano
+tendenze e non misure. Si veda il paragrafo sulla ripetibilità.
+
+Ciò che è dimostrato è di natura diversa, e non richiede statistica:
+
+- la spirale isotropa **non chiudeva la distanza**, con la minima uguale
+  all'iniziale in tre prove su cinque;
+- i riagganci del criterio vecchio erano ciechi, con **zero** fotogrammi
+  rilevati su tre episodi, e ora non lo sono;
+- tre stime di velocità su quattordici erano **fisicamente impossibili**, e ora
+  vengono rifiutate;
+- con il limite attivo **nessuna** ricerca si è allontanata dal bersaglio;
+- l'errore della velocità stimata **vale quanto la velocità stessa** — 10.8
+  contro 10.0 m/s su 5426 campioni — ed è la misura che, sola fra tutte quelle
+  di questa sezione, non risente della dispersione.
+
+Resta aperto il limite di fondo, che è quello già dichiarato da questo
+progetto: la qualità della stima di velocità. Che sia profondo lo dicono due
+osservazioni indipendenti — perfino la mediana su un secondo, venticinque
+campioni, produceva ancora valori oltre il limite fisico, quindi il rumore è
+correlato su tempi più lunghi della finestra e non si elimina filtrando; e
+l'errore mediano eguaglia il segnale su 5426 campioni.
+
+La via indicata dalla struttura del problema resta la stessa: fornire al filtro
+la velocità del velivolo come ingresso noto, così che stimi direttamente la
+velocità assoluta del bersaglio invece di ricavarla per differenza da
+un'immagine in cui i due moti sono sovrapposti. È la stessa direzione già
+indicata dalla prova sul termine di anticipo, e questa sezione la rafforza: due
+funzioni diverse — guida predittiva e ricerca direzionale — si sono fermate
+davanti allo stesso ostacolo, il che è un buon argomento perché sia quello
+l'ostacolo da rimuovere.
+
+**Cosa resta acceso.** Il centro della ricerca sull'ultima posizione nota del
+bersaglio, che non dipende dalla velocità e la cui utilità è visibile nel
+confronto con le prove storiche; il criterio di riaggancio sui rilevamenti veri;
+i quattro presidi sulla stima di velocità, che valgono anche per chiunque la
+usi in futuro. Spenta resta solo l'estrapolazione, in attesa della stima che la
+renderebbe sensata.
+
+---
+
 ## Misura e ripetibilità
 
 Le cifre citate in questo documento nascevano da script Python scritti sul
@@ -1015,11 +1293,27 @@ missione, quindi una prova corrisponde sempre a un file.
 ```bash
 metriche.py riassumi /ws/metrics/metrics_20260904_181500.csv
 metriche.py confronta /ws/metrics/prova_A.csv /ws/metrics/prova_B.csv
+metriche.py ricerche /ws/metrics/*_cieco8_*.csv
+metriche.py gruppi '*_cieco8_*.csv' '*_spirale_*.csv'
 ```
 
 `riassumi` dà durata degli agganci, distanza mediana e media, frazione di
 campioni con bersaglio, tempo per fase, ritmo della percezione. `confronta`
 verifica la ripetibilità di due prove gemelle.
+
+`ricerche` elenca ogni episodio di `RICERCA` con il suo esito: durata, distanza
+al momento della perdita, distanza minima raggiunta, e se il bersaglio è stato
+davvero ritrovato. Quest'ultimo punto non si legge dalla macchina a stati, che
+dichiara il riaggancio su fotogrammi validi del tracker e quindi anche su
+predizioni; la prova sta invece nella semantica del filtro, che dopo
+`soglia_perdita` si azzera e può tornare valido solo ricevendo una misura vera.
+Una risalita di `trk_valido` da 0 a 1 è percio un rilevamento avvenuto, anche
+quando il campionamento a 5 Hz non lo vede — e spesso non lo vede, perché il
+rilevatore pubblica a ~25 Hz e un avvistamento di un solo fotogramma ha una
+probabilità su cinque di finire in un campione.
+
+`gruppi` confronta due configurazioni con più prove ciascuna. Esiste per non
+invitare più a usare `confronta` dove non si può: si veda il paragrafo seguente.
 
 **Quanto sono ripetibili, in concreto.** Due prove con la stessa configurazione
 e lo stesso seme, da stack riavviato (misura del 4 settembre 2026, 60 s
@@ -1041,6 +1335,40 @@ parte a un istante diverso e da lì tutto slitta. La ripetibilità del progetto 
 quindi **in distribuzione, non in traiettoria**: si confrontano durata degli
 agganci, distanze mediane e frazioni di visibilità, non gli istanti uno per
 uno.
+
+**Alla scala reale la ripetibilità è molto peggiore, e va detto.** Il 3% qui
+sopra è stato misurato con il bersaglio a passo d'uomo su un'orbita da 3 m: a
+quella scala il drone stava sopra il bersaglio per quasi tutta la prova e non
+c'era molto che potesse andare diversamente. Con la fuga a 15 m/s la dinamica
+diventa marginale — il drone recupera 5-10 m/s su un bersaglio che ne fa 15 — e
+in una situazione marginale piccole differenze di istante decidono l'esito.
+
+La misura, sei prove del 6 settembre 2026 a 120 s simulati, tre per
+configurazione:
+
+| | durate dell'aggancio iniziale |
+|---|---|
+| Configurazione A | 29 s, 107 s, 105 s |
+| Configurazione B | 54 s, 74 s, 3 s |
+
+Fino alla prima perdita del bersaglio le due configurazioni eseguono **codice
+identico** — differiscono solo in cosa fanno durante `RICERCA` — quindi quei sei
+numeri misurano la dispersione e nient'altro. Va da 3 a 107 secondi: un fattore
+trenta fra il caso peggiore e il migliore, e un fattore due-quattro fra prove
+della stessa configurazione.
+
+Le conseguenze sul metodo sono due, e valgono per qualunque misura futura a
+questa scala:
+
+- **niente conclusioni da una prova sola**, e nemmeno da due: servono almeno
+  tre ripetizioni per configurazione, alternate fra loro perché una deriva della
+  macchina non cada tutta su una;
+- **l'unità di analisi è l'episodio, non la prova**, dove la domanda lo
+  consente. Per giudicare la ricerca, per esempio, la domanda è «dato che il
+  bersaglio è stato perso, viene ritrovato?»: una prova che non lo perde mai non
+  ha voce in capitolo, ma peserebbe eccome su una mediana per prova. Aggregando
+  gli episodi il campione utile passa da tre valori a una decina. È la ragione
+  per cui `metriche.py gruppi` stampa due blocchi separati.
 
 Per ridurre lo sfasamento, `target_mover_node` riporta il bersaglio al punto di
 partenza dell'orbita quando la missione lascia `ATTESA`: senza questo, ogni
@@ -1206,7 +1534,7 @@ parametro a mano con `param set ARMING_SKIPCHK 1` prima di `arm throttle`.
 ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true"
 ```
 
-La quota di decollo dev'essere **12 m**, coerente con i waypoint. La quota entra
+La quota di decollo dev'essere **50 m**, coerente con i waypoint. La quota entra
 anche nella conversione da coordinate immagine a metri fatta dal controller,
 quindi volare a una quota molto diversa cambia la scala dell'errore — non i
 guadagni, che sono in unità fisiche, ma l'ampiezza dell'area inquadrata.
@@ -1400,7 +1728,7 @@ concreti:
 | `dt` del Kalman | fisso a 0.1 con ingresso fra 5 e 15 Hz | ricavato dai tempi reali |
 | Derivata del controller | divisione per 0.1 fisso | divisione per il `dt` misurato |
 | Soglia di avvio ricerca | 20 frame → fra 1.5 e 4 s secondo il carico | `soglia_avvia_ricerca_s` |
-| Espansione della spirale | 0.002 per chiamata a 2 Hz = **4 mm/s** | `ricerca_vel_espansione = 0.4` m/s |
+| Espansione della spirale | 0.002 per chiamata a 2 Hz = **4 mm/s** | `ricerca_vel_espansione = 3.0` m/s |
 
 **La spirale di ricerca non si allargava** — è il caso più estremo dello stesso
 errore. `ricerca_espansione += 0.002` a ogni chiamata, su un timer a 2 Hz, dà
@@ -1409,12 +1737,14 @@ errore. `ricerca_espansione += 0.002` a ogni chiamata, su un timer a 2 Hz, dà
 mentre il bersaglio in fuga si allontanava a 1.2 m/s. Il drone entrava in
 `RICERCA` e non ritrovava più nulla.
 
-Ora l'espansione è **0.4 m/s** e la velocità angolare **0.35 rad/s**: un giro
-dura ~18 s e lascia ~7 m fra un braccio e il successivo, meno dei ~15 m
-inquadrati a 12 m di quota, quindi la spirale non salta porzioni di terreno.
-Da 3 a 25 m di raggio in 55 secondi. Superato `ricerca_raggio_max = 25.0` la
-ricerca è dichiarata fallita e la missione torna a `PATTUGLIAMENTO`, invece di
-allargarsi indefinitamente allontanandosi dall'area di interesse.
+Corretta l'espansione, la spirale ha poi dovuto seguire la scala dello
+scenario. Ai valori attuali — espansione **3.0 m/s**, velocità angolare
+**0.25 rad/s** — un giro dura ~25 s e allarga il raggio di ~75 m, meno dei 100 m
+di lato dell'impronta a 50 m di quota, quindi non restano porzioni di terreno
+non guardate. Da `ricerca_raggio` = 30 m a `ricerca_raggio_max` = 300 m in 90
+secondi, oltre i quali la ricerca è dichiarata fallita e la missione torna a
+`PATTUGLIAMENTO` invece di allargarsi indefinitamente allontanandosi dall'area
+di interesse.
 
 Effetto misurato su 100 s di missione:
 
@@ -1442,9 +1772,9 @@ dinamico, quindi fra un comando di posa e il successivo la fisica se ne
 impossessava: una sfera senza attrito di rotolamento accumulava velocità e
 rotolava lentamente fuori dal percorso previsto, tanto da non farsi mai trovare
 dal drone al primo passaggio. Ora è dichiarato `<static>true</static>`: il moto è
-interamente comandato da `target_mover_node` e la fisica non lo tocca. La quota è
-stata portata da 0.5 a 0.3 m, pari al raggio della sfera, così poggia a terra
-invece di restare sospesa.
+interamente comandato da `target_mover_node` e la fisica non lo tocca. La quota
+del modello vale metà della sua altezza — 0.8 m per il parallelepipedo attuale,
+0.3 m per la sfera di allora — così poggia a terra invece di restare sospeso.
 
 **MAVROS riempiva i log di errori sul sensore di distanza** — ArduPilot invia
 messaggi `DISTANCE_SENSOR` dal rangefinder simulato, e il plugin `distance_sensor`
@@ -1504,7 +1834,8 @@ grep -c "<static>true</static>" "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/w
 grep "update_rate" "$HOME/Desktop/Progetto Drone/ardupilot_gazebo/models/iris_with_ardupilot/model.sdf"
 ```
 
-Il primo deve restituire `1` (sfera statica, altrimenti rotola via da sola), il
+Il primo deve restituire `1` (bersaglio statico: se non lo è, la fisica lo
+sposta), il
 secondo `<update_rate>30</update_rate>`. Se i valori non corrispondono, la
 simulazione sta girando su asset vecchi e le correzioni del repository non hanno
 effetto.

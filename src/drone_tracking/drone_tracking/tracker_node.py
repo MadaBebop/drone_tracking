@@ -282,7 +282,15 @@ class TrackerNode(Node):
             posizione_stimata.y = float(self.stato_stimato[1].item())
             posizione_stimata.z = float(self.ultima_area)
             self.pub.publish(posizione_stimata)
-            self._pubblica_velocita(True)
+            # La POSIZIONE predetta e utilizzabile e va pubblicata: e cio che
+            # tollera le micro-interruzioni. La VELOCITA no. Durante la
+            # predizione non arriva alcuna informazione nuova sul moto, e lo
+            # stato di velocita resta congelato all'ultimo valore stimato:
+            # pubblicarlo come valido significa spacciare per misure ripetute
+            # cio che e una sola misura ripetuta molte volte. Chi ne fa una
+            # media la trova immobile, e il filtraggio si annulla proprio
+            # nell'istante che precede la perdita, l'unico in cui serve.
+            self._pubblica_velocita(False)
             # self.get_logger().info(
             #     f'Tentativo predizione — Frame persi: {self.frame_senza_segnale}/{self.soglia_perdita}')
 

@@ -17,6 +17,7 @@ import math
 import pytest
 import rclpy
 from geometry_msgs.msg import Point, PoseStamped
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Float64, String
 
 from drone_tracking.controller_node import ControllerNode
@@ -41,7 +42,13 @@ def controller_in_aggancio():
     """Controller pronto a inseguire: in volo, con posa e fase corrette."""
     nodo = ControllerNode()
     nodo.on_posa(PoseStamped())            # assetto piatto, yaw zero
-    nodo.on_altitudine(Float64(data=12.0))
+    # Quota di crociera reale dello scenario. Non e un dettaglio: la zona
+    # morta e in metri, e la stessa coordinata immagine vale meno metri di
+    # errore piu si vola bassi. A 12 m — la quota della prima versione — un
+    # bersaglio a un quinto di semicampo cadeva sotto soglia e il comando
+    # usciva nullo, facendo fallire le prove sul coasting per un motivo che
+    # con il coasting non c'entra nulla.
+    nodo.on_altitudine(Float64(data=50.0))
     nodo.on_stato_missione(String(data=FaseMissione.AGGANCIO.value))
     return nodo
 
@@ -112,6 +119,17 @@ def controller_con_anticipo():
     return nodo
 
 
+def riempi_finestra(nodo, quota, ripetizioni=None):
+    """Porta la finestra della velocita a un numero di campioni sufficiente.
+
+    La stima istantanea impostata sulle variabili del nodo viene inserita piu
+    volte: la grandezza usata e la mediana, e sotto il minimo di campioni
+    l'intero termine si disattiva.
+    """
+    for _ in range(ripetizioni or nodo.campioni_velocita_min):
+        nodo._aggiorna_finestra_velocita(quota)
+
+
 def test_anticipo_pareggia_la_velocita_del_bersaglio():
     """Con il drone fermo, l'anticipo vale la velocita stimata del bersaglio."""
     nodo = controller_con_anticipo()
@@ -123,7 +141,8 @@ def test_anticipo_pareggia_la_velocita_del_bersaglio():
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_x = 0.0
         nodo.vel_stimata_y = 0.1          # unita normalizzate al secondo
-        avanti, laterale = nodo._anticipo(quota)
+        riempi_finestra(nodo, quota)
+        avanti, laterale = nodo._anticipo()
         atteso = -0.1 * quota * nodo.tan_semi_fov_v
         assert abs(avanti - atteso) < 1e-9
         assert abs(laterale) < 1e-9
@@ -150,7 +169,8 @@ def test_anticipo_nullo_se_il_bersaglio_e_fermo():
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_x = 0.0
         nodo.vel_stimata_y = 2.0 / (quota * nodo.tan_semi_fov_v)
-        avanti, laterale = nodo._anticipo(quota)
+        riempi_finestra(nodo, quota)
+        avanti, laterale = nodo._anticipo()
         assert abs(avanti) < 1e-9, 'anticipo %.4f: sta inseguendo se stesso' % avanti
         assert abs(laterale) < 1e-9
     finally:
@@ -165,23 +185,187 @@ def test_anticipo_si_disattiva_senza_i_dati_necessari():
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_y = 0.1
 
-        # Velocita del velivolo mai ricevuta: la ricostruzione sarebbe errata.
+        # Velocita del velivolo mai ricevuta: la ricostruzione sarebbe errata,
+        # e nessun campione deve entrare nella finestra.
         nodo.istante_vel_drone = None
-        assert nodo._anticipo(12.0) == (0.0, 0.0)
+        riempi_finestra(nodo, 12.0)
+        assert nodo._anticipo() == (0.0, 0.0)
 
         # Ricevuta, ma vecchia.
         nodo.istante_vel_drone = ora(nodo) - 10.0
-        assert nodo._anticipo(12.0) == (0.0, 0.0)
+        riempi_finestra(nodo, 12.0)
+        assert nodo._anticipo() == (0.0, 0.0)
 
         # Stima del filtro non valida.
         nodo.istante_vel_drone = ora(nodo)
         nodo.vel_stimata_valida = False
-        assert nodo._anticipo(12.0) == (0.0, 0.0)
+        riempi_finestra(nodo, 12.0)
+        assert nodo._anticipo() == (0.0, 0.0)
+
+        # Un campione solo: sotto il minimo, la mediana non e affidabile.
+        nodo.vel_stimata_valida = True
+        nodo._aggiorna_finestra_velocita(12.0)
+        assert len(nodo.finestra_velocita) == 1
+        assert nodo._anticipo() == (0.0, 0.0)
 
         # Termine disattivato per scelta.
-        nodo.vel_stimata_valida = True
+        riempi_finestra(nodo, 12.0)
         nodo.set_parameters([Parameter('k_anticipo', Parameter.Type.DOUBLE, 0.0)])
-        assert nodo._anticipo(12.0) == (0.0, 0.0)
+        assert nodo._anticipo() == (0.0, 0.0)
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_velocita_predetta_non_e_valida():
+    """Durante la predizione la velocita non porta informazione nuova.
+
+    Lo stato di velocita resta congelato all'ultimo valore stimato finche non
+    arriva una misura. Pubblicarlo come valido significa spacciare per misure
+    ripetute cio che e una sola misura ripetuta: chi ne fa una mediana la
+    trova immobile, e il filtraggio si annulla proprio nei fotogrammi che
+    precedono la perdita, gli unici in cui serve.
+
+    La POSIZIONE predetta resta invece valida: e cio che tollera le
+    micro-interruzioni dell'inseguimento.
+    """
+    nodo = TrackerNode()
+    pubblicate = []
+    nodo._pubblica_velocita = lambda valida: pubblicate.append(valida)
+    try:
+        nodo.on_detection(Point(x=0.1, y=0.1, z=100.0))   # acquisizione
+        nodo.on_detection(Point(x=0.2, y=0.1, z=100.0))   # misura
+        assert pubblicate[-1] is True, 'una misura deve valere una velocita'
+
+        nodo.on_detection(Point(x=0.0, y=0.0, z=0.0))     # niente segnale
+        assert pubblicate[-1] is False, (
+            'la velocita predetta e stata pubblicata come valida')
+    finally:
+        nodo.destroy_node()
+
+
+def test_velocita_impossibile_viene_rifiutata():
+    """Una stima oltre il limite fisico non va troncata, va rifiutata.
+
+    Misurato su quattordici perdite: tre stime valevano 41, 33 e 76 m/s contro
+    un bersaglio che non supera i 15. Estrapolare 76 m/s per otto secondi manda
+    il punto di ricerca a seicento metri dal vero; troncare a 25 lo manderebbe
+    a duecento, sempre nella direzione sbagliata. Un valore impossibile non
+    significa "circa quello", significa "non lo so", e la ricerca deve poterlo
+    sapere.
+    """
+    nodo = controller_in_aggancio()
+    try:
+        quota = 50.0
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.vel_drone_x = 0.0
+        nodo.vel_drone_y = 0.0
+        nodo.vel_stimata_valida = True
+        nodo.vel_stimata_x = 0.0
+        # 2.0 unita normalizzate al secondo a 50 m di quota sono 75 m/s.
+        nodo.vel_stimata_y = 2.0
+        for _ in range(nodo.campioni_velocita_min):
+            nodo._aggiorna_finestra_velocita(quota)
+        assert nodo._velocita_bersaglio() is None, (
+            'una velocita impossibile e stata accettata')
+
+        # Sotto il limite la stessa strada deve invece produrre un valore.
+        nodo.finestra_velocita = []
+        nodo.vel_stimata_y = 0.2          # 7.5 m/s
+        for _ in range(nodo.campioni_velocita_min):
+            nodo._aggiorna_finestra_velocita(quota)
+        assert nodo._velocita_bersaglio() is not None
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_velocita_stabilita_sopravvive_alla_fine_delle_misure():
+    """Cessate le misure, la velocita resta utilizzabile per un tempo breve.
+
+    I fotogrammi che precedono la perdita sono predizioni e non alimentano la
+    finestra: senza memoria la velocita risulterebbe ignota proprio alla
+    perdita, cioe nell'unico istante in cui la ricerca deve usarla. Misurato:
+    con la sola esclusione delle predizioni la stima pubblicata alla perdita
+    valeva (0.0, 0.0) e la ricerca smetteva di extrapolare.
+    """
+    nodo = controller_in_aggancio()
+    try:
+        quota = 50.0
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.vel_drone_x = 0.0
+        nodo.vel_drone_y = 0.0
+        nodo.vel_stimata_valida = True
+        nodo.vel_stimata_x = 0.0
+        nodo.vel_stimata_y = 0.2
+        riempi_finestra(nodo, quota)
+        stabilita = nodo._velocita_bersaglio()
+        assert stabilita is not None
+
+        # Le misure cessano: finestra vuota, come dopo qualche fotogramma di
+        # sola predizione.
+        nodo.finestra_velocita = []
+        assert nodo._velocita_bersaglio() == stabilita, (
+            'la velocita appena stabilita e stata dimenticata subito')
+
+        # Passato il tempo di validita torna ignota, invece di restare vera
+        # per sempre.
+        avanti, laterale, istante = nodo.ultima_velocita_valida
+        nodo.ultima_velocita_valida = (
+            avanti, laterale, istante - nodo.validita_velocita_s - 1.0)
+        assert nodo._velocita_bersaglio() is None
+    finally:
+        nodo.destroy_node()
+
+
+def test_una_stima_impossibile_non_sostituisce_una_buona():
+    """Il valore ricordato non viene aggiornato da una stima fuori dal fisico."""
+    nodo = controller_in_aggancio()
+    try:
+        quota = 50.0
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.vel_drone_x = 0.0
+        nodo.vel_drone_y = 0.0
+        nodo.vel_stimata_valida = True
+        nodo.vel_stimata_x = 0.0
+        nodo.vel_stimata_y = 0.2                  # 7.5 m/s, plausibile
+        riempi_finestra(nodo, quota)
+        buona = nodo._velocita_bersaglio()
+
+        nodo.finestra_velocita = []
+        nodo.vel_stimata_y = 2.0                  # 75 m/s, impossibile
+        riempi_finestra(nodo, quota)
+        assert nodo._velocita_bersaglio() == buona, (
+            'una stima impossibile ha sostituito quella buona')
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_mediana_scarta_le_inversioni_di_direzione():
+    """Una direzione che si inverte fra fotogrammi non deve sopravvivere.
+
+    E la situazione misurata prima di ogni perdita: il bersaglio scivola al
+    bordo dell'inquadratura mentre il velivolo manovra, e la sua posizione
+    nell'immagine oscilla da un lato all'altro. La velocita istantanea segue
+    l'oscillazione, la mediana no.
+    """
+    nodo = controller_in_aggancio()
+    try:
+        quota = 50.0
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.vel_drone_x = 0.0
+        nodo.vel_drone_y = 0.0
+        nodo.vel_stimata_valida = True
+        nodo.vel_stimata_x = 0.0
+
+        # Sette campioni: cinque di un moto coerente e due che lo negano.
+        for valore in (0.1, 0.1, -0.4, 0.1, 0.1, 0.5, 0.1):
+            nodo.vel_stimata_y = valore
+            nodo._aggiorna_finestra_velocita(quota)
+
+        avanti, _ = nodo._velocita_bersaglio()
+        atteso = -0.1 * quota * nodo.tan_semi_fov_v
+        assert abs(avanti - atteso) < 1e-6, (
+            'la mediana ha seguito le inversioni: %.2f invece di %.2f'
+            % (avanti, atteso))
     finally:
         nodo.destroy_node()
 
@@ -449,11 +633,182 @@ def mission_in_aggancio():
     posa = PoseStamped()
     posa.pose.position.x = 20.0
     posa.pose.position.y = 20.0
-    posa.pose.position.z = 12.0
+    posa.pose.position.z = 50.0
     nodo.on_position(posa)
     nodo.fase = FaseMissione.AGGANCIO
     nodo.bersaglio_agganciato = True
     return nodo
+
+
+def stima_bersaglio(x, y, vx, vy, valida=True):
+    """Messaggio di stima come lo pubblica il controllo."""
+    msg = Odometry()
+    msg.pose.pose.position.x = x
+    msg.pose.pose.position.y = y
+    msg.twist.twist.linear.x = vx
+    msg.twist.twist.linear.y = vy
+    msg.twist.covariance[0] = 1.0 if valida else 0.0
+    return msg
+
+
+def rilevamento(visto):
+    """Messaggio del rilevatore. La convenzione e l'area: z a zero, niente."""
+    return Point(x=0.1, y=0.1, z=120.0 if visto else 0.0)
+
+
+def test_riaggancio_non_scatta_sulla_predizione_del_filtro():
+    """Un lampo di un fotogramma non deve valere un riaggancio.
+
+    Misurato: con la ricerca direzionale il drone arriva abbastanza vicino da
+    far comparire il bersaglio nell'angolo dell'inquadratura per uno o due
+    fotogrammi. Il filtro resta poi valido per `soglia_perdita` fotogrammi
+    anche senza altre misure, e la missione, contando quelli, dichiarava il
+    riaggancio: ne uscivano agganci di quattro secondi con il rilevatore che
+    non vedeva nulla in nessun campione, e per tutta la loro durata la
+    missione smetteva di cercare.
+    """
+    nodo = mission_in_aggancio()
+    try:
+        nodo.fase = FaseMissione.RICERCA
+        nodo.bersaglio_agganciato = False
+
+        # Il tracker pubblica posizioni valide — sono predizioni, ma da fuori
+        # non si distinguono — e nessun rilevamento le sostiene.
+        for _ in range(20):
+            nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        assert nodo.fase == FaseMissione.RICERCA, (
+            'riagganciato senza un solo rilevamento')
+    finally:
+        nodo.destroy_node()
+
+
+def test_riaggancio_scatta_sui_rilevamenti_veri():
+    """Con rilevamenti consecutivi veri il riaggancio deve invece scattare."""
+    nodo = mission_in_aggancio()
+    try:
+        nodo.fase = FaseMissione.RICERCA
+        nodo.bersaglio_agganciato = False
+
+        for _ in range(nodo.frame_conferma_riaggancio - 1):
+            nodo.on_rilevamento(rilevamento(True))
+        nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        assert nodo.fase == FaseMissione.RICERCA, 'un rilevamento in meno basta'
+
+        nodo.on_rilevamento(rilevamento(True))
+        nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        assert nodo.fase == FaseMissione.AGGANCIO
+    finally:
+        nodo.destroy_node()
+
+
+def test_i_rilevamenti_devono_essere_consecutivi():
+    """Un buco azzera il conteggio: due lampi separati non fanno un aggancio."""
+    nodo = mission_in_aggancio()
+    try:
+        nodo.fase = FaseMissione.RICERCA
+        nodo.bersaglio_agganciato = False
+
+        nodo.on_rilevamento(rilevamento(True))
+        nodo.on_rilevamento(rilevamento(False))
+        nodo.on_rilevamento(rilevamento(True))
+        nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        assert nodo.fase == FaseMissione.RICERCA
+    finally:
+        nodo.destroy_node()
+
+
+def test_rilevamenti_a_rilevamento_disattivato_non_si_accumulano():
+    """Il conteggio non deve sopravvivere alla porta chiusa.
+
+    Altrimenti i rilevamenti arrivati mentre il rilevamento era ancora
+    disattivato si sommerebbero, e l'aggancio scatterebbe nell'istante esatto
+    in cui la porta si apre, senza aver visto nulla da quel momento.
+    """
+    nodo = MissionNode()
+    try:
+        posa = PoseStamped()
+        posa.pose.position.z = 50.0
+        nodo.on_position(posa)
+        nodo.fase = FaseMissione.PATTUGLIAMENTO
+        nodo.rilevamento_attivo = False
+
+        for _ in range(20):
+            nodo.on_rilevamento(rilevamento(True))
+            nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        assert nodo.fase == FaseMissione.PATTUGLIAMENTO
+        assert nodo.rilevamenti_consecutivi == 0
+    finally:
+        nodo.destroy_node()
+
+
+def test_ricerca_parte_dalla_posizione_del_bersaglio():
+    """Il centro della ricerca e dove era il BERSAGLIO, non dove era il drone.
+
+    A velocita reali le due posizioni differiscono di decine di metri, e
+    cercare attorno a se stessi significa cercare dove il bersaglio non e.
+    """
+    nodo = mission_in_aggancio()
+    try:
+        nodo.on_stima_bersaglio(stima_bersaglio(200.0, 100.0, 15.0, 0.0))
+        nodo.istante_ultimo_target = ora(nodo) - 10.0
+        nodo.istante_perdita = ora(nodo) - nodo.soglia_avvia_ricerca_s - 1.0
+        nodo.istante_ultima_posa = ora(nodo)
+        nodo.aggiorna_missione()
+
+        assert nodo.fase == FaseMissione.RICERCA
+        # Il drone era a (20, 20): il centro deve essere quello del bersaglio.
+        assert abs(nodo.ricerca_centro_x - 200.0) < 1.0
+        assert abs(nodo.ricerca_centro_y - 100.0) < 1.0
+    finally:
+        nodo.destroy_node()
+
+
+def test_inseguimento_cieco_va_dove_il_bersaglio_stava_andando():
+    """Acceso, il primo tempo della ricerca extrapola il moto.
+
+    Il default e zero, cioe spento, perche misurato non conviene: l'errore
+    della velocita stimata vale quanto la velocita stessa. La prova lo accende
+    esplicitamente, come quella sull'anticipo, altrimenti passerebbe senza
+    verificare nulla.
+    """
+    from rclpy.parameter import Parameter
+
+    nodo = mission_in_aggancio()
+    try:
+        nodo.set_parameters([Parameter(
+            'durata_inseguimento_cieco_s', Parameter.Type.DOUBLE, 8.0)])
+        adesso = ora(nodo)
+        nodo.on_stima_bersaglio(stima_bersaglio(200.0, 100.0, 15.0, 0.0))
+        nodo.fase = FaseMissione.RICERCA
+        nodo.istante_inizio_ricerca = adesso
+        # Quattro secondi di estrapolazione a 15 m/s: sessanta metri avanti.
+        nodo.stima_bersaglio = (200.0, 100.0, 15.0, 0.0, adesso - 4.0)
+        nodo.esegui_ricerca()
+
+        # Il waypoint pubblicato non e ispezionabile da qui, ma il centro
+        # della spirale viene aggiornato alla stessa posizione extrapolata,
+        # quindi verificarlo verifica l'estrapolazione.
+        assert abs(nodo.ricerca_centro_x - 260.0) < 2.0, nodo.ricerca_centro_x
+        assert abs(nodo.ricerca_centro_y - 100.0) < 2.0
+    finally:
+        nodo.destroy_node()
+
+
+def test_senza_velocita_stimata_non_si_extrapola():
+    """Se la velocita non e ricostruibile, l'estrapolazione non deve inventare.
+
+    Volare verso l'ultima posizione nota e cio che faceva la spirale: senza la
+    bandiera di validita il primo tempo della ricerca sarebbe indistinguibile
+    dal secondo, e sembrerebbe funzionare senza fare nulla.
+    """
+    nodo = mission_in_aggancio()
+    try:
+        nodo.on_stima_bersaglio(
+            stima_bersaglio(200.0, 100.0, 15.0, 0.0, valida=False))
+        assert nodo.stima_bersaglio[2] == 0.0
+        assert nodo.stima_bersaglio[3] == 0.0
+    finally:
+        nodo.destroy_node()
 
 
 def test_mission_passa_a_ricerca_senza_messaggi():

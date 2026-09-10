@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import math
+from statistics import median
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point, PoseStamped, Twist, TwistStamped
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Float64, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from drone_tracking.mission_node import FaseMissione  # type: ignore
@@ -67,6 +69,14 @@ class ControllerNode(Node):
         self.mavros_vel_pub = self.create_publisher(
             Twist, '/mavros/setpoint_velocity/cmd_vel_unstamped', 10)
 
+        # Stima del bersaglio nel frame del mondo: posizione e velocita in
+        # metri, non piu in coordinate immagine. Il controllo le calcola gia
+        # per il proprio comando, e pubblicarle evita che mission_node debba
+        # rifare la stessa conversione — due copie della stessa formula
+        # divergono al primo che ne corregge una sola.
+        self.stima_pub = self.create_publisher(
+            Odometry, '/target/odometria', 10)
+
         self.gps_jammed     = False
         self.altitudine     = 0.0
         self.in_volo        = False
@@ -76,6 +86,7 @@ class ControllerNode(Node):
         self.roll           = 0.0
         self.gimbal_roll    = 0.0
         self.gimbal_pitch   = 0.0
+        self.posizione_drone = None
 
         # --- Guida predittiva ---
         # Con k = 1 il comando conterrebbe per intero la velocita stimata del
@@ -103,6 +114,28 @@ class ControllerNode(Node):
         #
         # Il termine resta disponibile e parametrico, spento per default.
         self.k_anticipo = parametro(self, 'k_anticipo', 0.0)
+
+        # Finestra su cui si prende la mediana della velocita stimata. Un
+        # secondo a ~25 Hz sono venticinque campioni: abbastanza perche una
+        # direzione che si inverte fra un fotogramma e il successivo non
+        # sopravviva, abbastanza pochi perche un moto vero non venga spianato.
+        self.finestra_velocita_s = parametro(self, 'finestra_velocita_s', 1.0)
+        self.campioni_velocita_min = parametro(
+            self, 'campioni_velocita_min', 5)
+        # Limite fisico, non una taratura: nessun veicolo terrestre di questo
+        # scenario supera i 25 m/s, cioe 90 km/h. Una stima che lo supera e
+        # impossibile e va rifiutata.
+        self.vel_bersaglio_max = parametro(self, 'vel_bersaglio_max', 25.0)
+        # Per quanto una velocita stabilita da misure vere resta utilizzabile
+        # dopo che le misure sono cessate. Serve perche i fotogrammi che
+        # precedono la perdita sono predizioni, che non alimentano la finestra:
+        # senza memoria la velocita risulterebbe ignota proprio alla perdita,
+        # cioe nell'unico istante in cui la ricerca deve usarla.
+        self.validita_velocita_s = parametro(self, 'validita_velocita_s', 2.0)
+        # Campioni recenti: (istante, avanti, laterale).
+        self.finestra_velocita = []
+        # Ultimo valore ben stabilito: (avanti, laterale, istante).
+        self.ultima_velocita_valida = None
         self.vel_stimata_x = 0.0
         self.vel_stimata_y = 0.0
         self.vel_stimata_valida = False
@@ -273,23 +306,23 @@ class ControllerNode(Node):
 
         self.mavros_vel_pub.publish(self._comando_da_pubblicare())
 
-    def _anticipo(self, quota):
-        """Velocita da aggiungere al comando, nel frame del velivolo.
+    def _velocita_istantanea(self, quota):
+        """Velocita ASSOLUTA del bersaglio ricavata dall'ultimo fotogramma.
 
-        Restituisce (avanti, laterale). Zero quando manca la stima o la
-        velocita del velivolo: senza una delle due la ricostruzione della
-        velocita assoluta del bersaglio sarebbe sbagliata, e un termine di
-        anticipo sbagliato e peggio di nessun termine.
+        Restituisce (avanti, laterale) oppure None se manca la stima del filtro
+        o la velocita del velivolo: senza una delle due la ricostruzione
+        sarebbe sbagliata, e una velocita sbagliata e peggio di nessuna.
+
+        Da sola non va usata: un singolo fotogramma misura l'oscillazione del
+        bersaglio nell'immagine piu che il suo moto. Alimenta la finestra da
+        cui `_velocita_bersaglio` prende la mediana.
         """
-        if self.k_anticipo == 0.0 or not self.vel_stimata_valida:
-            return 0.0, 0.0
+        if not self.vel_stimata_valida:
+            return None
         adesso = self.get_clock().now().nanoseconds / 1e9
         if (self.istante_vel_drone is None
                 or adesso - self.istante_vel_drone > self.timeout_posa_s):
-            self.get_logger().warn(
-                'Nessuna velocita da MAVROS: anticipo disattivato',
-                throttle_duration_sec=5.0)
-            return 0.0, 0.0
+            return None
 
         # Da coordinate immagine al secondo a metri al secondo al suolo, con la
         # stessa conversione usata per la posizione.
@@ -310,8 +343,111 @@ class ControllerNode(Node):
         drone_avanti = self.vel_drone_x * cos_y + self.vel_drone_y * sin_y
         drone_laterale = -self.vel_drone_x * sin_y + self.vel_drone_y * cos_y
 
-        return (self.k_anticipo * (rel_avanti + drone_avanti),
-                self.k_anticipo * (rel_laterale + drone_laterale))
+        return rel_avanti + drone_avanti, rel_laterale + drone_laterale
+
+    def _aggiorna_finestra_velocita(self, quota):
+        """Aggiunge la stima di questo fotogramma e scarta le troppo vecchie."""
+        istantanea = self._velocita_istantanea(quota)
+        if istantanea is None:
+            return
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        self.finestra_velocita.append((adesso, istantanea[0], istantanea[1]))
+        limite = adesso - self.finestra_velocita_s
+        self.finestra_velocita = [c for c in self.finestra_velocita
+                                  if c[0] >= limite]
+
+    def _velocita_bersaglio(self):
+        """Velocita ASSOLUTA del bersaglio, mediana sulla finestra recente.
+
+        Restituisce (avanti, laterale) oppure None quando la stima non e
+        utilizzabile, che qui vuol dire una di due cose: la finestra non ha
+        ancora abbastanza campioni — succede subito dopo un riaggancio, ed e
+        proprio allora che il filtro sta ancora convergendo — oppure la
+        velocita risultante e fisicamente impossibile.
+
+        Il rifiuto e voluto al posto del troncamento. Una stima da 76 m/s non
+        significa "molto veloce": significa che quella misura non descrive il
+        bersaglio, e chi la usa deve poterlo sapere invece di ricevere un
+        valore plausibile costruito su un dato che non lo era.
+        """
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        if len(self.finestra_velocita) >= self.campioni_velocita_min:
+            avanti = median([c[1] for c in self.finestra_velocita])
+            laterale = median([c[2] for c in self.finestra_velocita])
+            if math.hypot(avanti, laterale) <= self.vel_bersaglio_max:
+                self.ultima_velocita_valida = (avanti, laterale, adesso)
+                return avanti, laterale
+            # Impossibile: non solo non si restituisce, non si ricorda
+            # nemmeno. Una misura fuori dal fisico non deve poter sostituire
+            # una buona.
+            self.get_logger().warn(
+                'Velocita del bersaglio impossibile ({:.0f} m/s su un limite '
+                'di {:.0f}): stima rifiutata'.format(
+                    math.hypot(avanti, laterale), self.vel_bersaglio_max),
+                throttle_duration_sec=5.0)
+
+        # Nessuna stima nuova utilizzabile: vale l'ultima ben stabilita, finche
+        # e recente. Un bersaglio in fuga rettilinea non cambia velocita in un
+        # secondo, e l'alternativa non e una stima migliore ma nessuna stima.
+        if self.ultima_velocita_valida is None:
+            return None
+        avanti, laterale, istante = self.ultima_velocita_valida
+        if adesso - istante > self.validita_velocita_s:
+            return None
+        return avanti, laterale
+
+    def _anticipo(self):
+        """Termine di anticipo da sommare al comando, nel frame del velivolo.
+
+        E la velocita assoluta del bersaglio moltiplicata per il guadagno, che
+        per default vale zero: la misura dice che non conviene, si veda il
+        commento su k_anticipo.
+        """
+        if self.k_anticipo == 0.0:
+            return 0.0, 0.0
+        velocita = self._velocita_bersaglio()
+        if velocita is None:
+            self.get_logger().warn(
+                'Velocita del bersaglio non ricostruibile: anticipo disattivato',
+                throttle_duration_sec=5.0)
+            return 0.0, 0.0
+        return self.k_anticipo * velocita[0], self.k_anticipo * velocita[1]
+
+    def _pubblica_stima_mondo(self, error_x, error_y, quota, cos_y, sin_y):
+        """Posizione e velocita del bersaglio nel frame del mondo.
+
+        Le stesse grandezze che il controllo usa per il proprio comando, messe
+        a disposizione di chi deve decidere dove cercare quando l'aggancio si
+        perde. Senza, la ricerca puo solo essere isotropa, cioe ignorare
+        l'unica informazione utile che si possiede.
+        """
+        if self.posizione_drone is None:
+            return
+        # Stessa mappatura fra assi immagine e assi velivolo usata per il
+        # comando: un errore positivo lungo x corrisponde a un bersaglio
+        # spostato verso sinistra del velivolo.
+        rel_avanti = -error_y
+        rel_laterale = -error_x
+
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.pose.pose.position.x = (self.posizione_drone[0]
+                                    + rel_avanti * cos_y - rel_laterale * sin_y)
+        msg.pose.pose.position.y = (self.posizione_drone[1]
+                                    + rel_avanti * sin_y + rel_laterale * cos_y)
+        msg.pose.pose.orientation.w = 1.0
+
+        velocita = self._velocita_bersaglio()
+        if velocita is not None:
+            avanti, laterale = velocita
+            msg.twist.twist.linear.x = avanti * cos_y - laterale * sin_y
+            msg.twist.twist.linear.y = avanti * sin_y + laterale * cos_y
+            # La covarianza non e stimata: si usa il primo elemento come
+            # bandiera di validita della velocita, che e l'informazione che
+            # serve a valle.
+            msg.twist.covariance[0] = 1.0
+        self.stima_pub.publish(msg)
 
     def _avvia_coasting(self):
         """Congela il comando da cui parte la rampa di smorzamento.
@@ -353,6 +489,8 @@ class ControllerNode(Node):
 
     def on_posa(self, msg: PoseStamped):
         self.istante_posa = self.get_clock().now().nanoseconds / 1e9
+        p = msg.pose.position
+        self.posizione_drone = (p.x, p.y)
         q = msg.pose.orientation
         self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                               1.0 - 2.0 * (q.y * q.y + q.z * q.z))
@@ -489,7 +627,14 @@ class ControllerNode(Node):
         # aggiunge la velocita necessaria a non accumularne di nuovo. La stima
         # del filtro e relativa al drone, quindi si somma la velocita del
         # velivolo per ottenere quella assoluta del bersaglio.
-        avanti_ff, laterale_ff = self._anticipo(quota)
+        # Prima la finestra, poi chi la legge: l'ordine conta, altrimenti
+        # la stima pubblicata sarebbe vecchia di un fotogramma rispetto a
+        # quella usata per il comando, e due grandezze che devono coincidere
+        # non coinciderebbero.
+        self._aggiorna_finestra_velocita(quota)
+        self._pubblica_stima_mondo(error_x, error_y, quota, cos_y, sin_y)
+
+        avanti_ff, laterale_ff = self._anticipo()
         cmd.linear.x += avanti_ff * cos_y - laterale_ff * sin_y
         cmd.linear.y += avanti_ff * sin_y + laterale_ff * cos_y
 
