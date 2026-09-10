@@ -28,7 +28,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point, PoseStamped, TwistStamped
-from std_msgs.msg import Bool, Float64, String
+from std_msgs.msg import Bool, Float32, Float64, String
 
 # Stesso schema di accesso al simulatore usato da target_mover_node: i binding
 # nativi costano una frazione di millisecondo, il CLI centinaia. Se non sono
@@ -44,6 +44,7 @@ except ImportError:
 COLONNE = [
     't_sim', 't_wall', 'fase',
     'det_valido', 'det_x', 'det_y', 'det_area', 'det_hz',
+    'jam_valido', 'jam_x', 'jam_y', 'rumore_rf',
     'trk_valido', 'trk_x', 'trk_y', 'trk_area', 'trk_hz',
     'trk_vx', 'trk_vy',
     'ekf_x', 'ekf_y', 'ekf_z', 'roll', 'pitch', 'yaw',
@@ -85,6 +86,13 @@ class MetricsNode(Node):
         self.create_subscription(PoseStamped, '/mavros/local_position/pose',
                                  self.on_posa, qos_mavros)
         self.create_subscription(Point, '/target/position', self.on_detection, 10)
+        # Ingresso vero del filtro: il rilevamento dopo il jammer. E cio che
+        # il filtro deve ripulire, quindi e il termine di paragone corretto per
+        # misurarne il guadagno.
+        self.create_subscription(Point, '/target/jammed_position',
+                                 self.on_disturbata, 10)
+        # Livello di rumore dichiarato sul datalink: governa R nel tracker.
+        self.create_subscription(Float32, '/rf/noise_level', self.on_rumore, 10)
         self.create_subscription(Point, '/target/tracked_position', self.on_tracked, 10)
         # Velocita stimata dal filtro, in coordinate immagine al secondo e
         # relativa al drone: e la grandezza su cui si regge la guida
@@ -120,6 +128,11 @@ class MetricsNode(Node):
         self.fase = 'ATTESA'
         self.ekf = None
         self.det = None
+        # Non `self.jam`: quel nome era gia dello stato del jammer GPS, e
+        # riusarlo lo sovrascriveva con una terna, facendo morire il nodo al
+        # primo campionamento.
+        self.det_disturbata = None
+        self.rumore_rf = None
         self.trk = None
         self.trk_vel = None
         self.jam = False
@@ -284,6 +297,12 @@ class MetricsNode(Node):
 
     def on_detection(self, msg: Point):
         self.det = (msg.x, msg.y, msg.z)
+
+    def on_disturbata(self, msg: Point):
+        self.det_disturbata = (msg.x, msg.y, msg.z)
+
+    def on_rumore(self, msg):
+        self.rumore_rf = msg.data
         self.n_det += 1
 
     def on_tracked(self, msg: Point):
@@ -351,6 +370,10 @@ class MetricsNode(Node):
 
         riga = [round(t_sim, 3), round(t_wall, 3), self.fase]
         riga += [det_valido] + terna(self.det) + [round(self.n_det / dt, 1)]
+        d = self.det_disturbata
+        riga += [1 if (d and d[2] != 0.0) else 0]
+        riga += ([round(d[0], 4), round(d[1], 4)] if d else ['', ''])
+        riga += [round(self.rumore_rf, 4) if self.rumore_rf is not None else '']
         riga += [trk_valido] + terna(self.trk) + [round(self.n_trk / dt, 1)]
         riga += ([round(v, 4) for v in self.trk_vel] if self.trk_vel
                  else ['', ''])

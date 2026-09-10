@@ -771,6 +771,15 @@ riferimento a se stessa. Entrambe sono registrate: la colonna `dist_xy_ekf`
 accanto a `dist_xy_gt` rende visibile nei dati lo scarto fra le due, che il resto
 del progetto assume nullo.
 
+**L'ingresso del filtro, non solo la sua uscita.** Le colonne `jam_x`, `jam_y`,
+`jam_valido` registrano `/target/jammed_position`, cioè il rilevamento **dopo**
+il disturbo — quello che il filtro riceve davvero — e `rumore_rf` il livello
+dichiarato sul datalink, da cui dipende la matrice `R`. Mancavano, e senza di
+esse la domanda «quanto serve il filtro» non è rispondibile con i dati:
+confrontare la sua uscita con il rilevamento pulito misura l'errore residuo, non
+il guadagno, perché l'alternativa al filtro non è il segnale pulito — che
+nessuno possiede — ma quello disturbato.
+
 Alla chiusura il nodo stampa un riepilogo (campioni, percentuale di fotogrammi
 con bersaglio, distanza media, tempo per fase).
 
@@ -1296,6 +1305,21 @@ metriche.py confronta /ws/metrics/prova_A.csv /ws/metrics/prova_B.csv
 metriche.py ricerche /ws/metrics/*_cieco8_*.csv
 metriche.py gruppi '*_cieco8_*.csv' '*_spirale_*.csv'
 ```
+
+**Figure del filtro.** `grafici.py` rigenera dalle stesse tracce le due figure
+sul filtro di Kalman — stato stimato con `R` nel tempo, ed errore di posizione
+con e senza filtro:
+
+```bash
+python3 /usr/local/share/drone_tracking/scripts/grafici.py \
+    /ws/metrics/<prova>.csv /ws/metrics/figure
+```
+
+Esiste come script versionato e non come sessione interattiva per la stessa
+ragione di `metriche.py`: una figura che finisce in una relazione deve poter
+essere rifatta da chiunque, dallo stesso dato, ottenendo la stessa immagine.
+Restringe da sé la finestra al tratto di `AGGANCIO` continuo più lungo — il
+regime in cui il filtro lavora — così l'inquadratura non è scelta a occhio.
 
 `riassumi` dà durata degli agganci, distanza mediana e media, frazione di
 campioni con bersaglio, tempo per fase, ritmo della percezione. `confronta`
