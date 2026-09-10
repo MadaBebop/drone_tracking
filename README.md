@@ -1306,9 +1306,10 @@ metriche.py ricerche /ws/metrics/*_cieco8_*.csv
 metriche.py gruppi '*_cieco8_*.csv' '*_spirale_*.csv'
 ```
 
-**Figure del filtro.** `grafici.py` rigenera dalle stesse tracce le due figure
-sul filtro di Kalman — stato stimato con `R` nel tempo, ed errore di posizione
-con e senza filtro:
+**Figure.** `grafici.py` rigenera dalle stesse tracce tre figure: lo stato
+stimato con `R` nel tempo, l'errore di posizione con e senza filtro, e i
+percorsi di velivolo e bersaglio in pianta — pattugliamento, fughe, perdita e
+ricerca in un solo volo:
 
 ```bash
 python3 /usr/local/share/drone_tracking/scripts/grafici.py \
@@ -1318,8 +1319,14 @@ python3 /usr/local/share/drone_tracking/scripts/grafici.py \
 Esiste come script versionato e non come sessione interattiva per la stessa
 ragione di `metriche.py`: una figura che finisce in una relazione deve poter
 essere rifatta da chiunque, dallo stesso dato, ottenendo la stessa immagine.
-Restringe da sé la finestra al tratto di `AGGANCIO` continuo più lungo — il
-regime in cui il filtro lavora — così l'inquadratura non è scelta a occhio.
+Le due figure sul filtro restringono da sé la finestra al tratto di `AGGANCIO`
+continuo più lungo — il regime in cui il filtro lavora — così l'inquadratura non
+è scelta a occhio; quella dei percorsi usa invece la prova intera, perché lì il
+soggetto è il volo dall'inizio alla fine. Nella figura dei percorsi la fuga è
+distinta dall'orbita per **tasso di virata**, 0.00 contro 0.25 rad/s, e non per
+velocità: l'orbita vale 10 m/s tangenziali e la fuga sale a 15 passando per
+tutti i valori intermedi durante la rampa, quindi il modulo da solo non separa i
+due moti mentre la geometria sì.
 
 `riassumi` dà durata degli agganci, distanza mediana e media, frazione di
 campioni con bersaglio, tempo per fase, ritmo della percezione. `confronta`

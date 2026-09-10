@@ -5,8 +5,9 @@
 
 Produce due immagini:
 
-    kalman_stima.png    stato stimato e matrice R nel tempo
-    kalman_errore.png   errore di posizione con e senza filtro
+    kalman_stima.png       stato stimato e matrice R nel tempo
+    kalman_errore.png      errore di posizione con e senza filtro
+    ricerca_evasione.png   percorsi di velivolo e bersaglio, in pianta
 
 Esistono come script e non come sessione interattiva per la stessa ragione per
 cui esiste metriche.py: una figura che finisce in una relazione deve poter
@@ -554,6 +555,196 @@ def figura_errore(righe, uscita):
     print('  istanti coperti dal solo filtro: %d' % len(solo_filtro))
 
 
+def maschera_evasione(righe, soglia_virata=0.10):
+    """Vero, per ogni campione, se il bersaglio sta fuggendo invece di orbitare.
+
+    La velocita da sola non basta a distinguerli: l'orbita vale 10 m/s
+    tangenziali e la fuga sale a 15 passando per tutti i valori intermedi
+    durante la rampa di accelerazione. Il tasso di VIRATA invece li separa
+    nettamente, perche i due moti hanno geometria diversa e non solo modulo
+    diverso: misurati, 0.25 rad/s sull'orbita da 40 m di raggio contro 0.00 in
+    linea retta.
+    """
+    punti = []
+    for r in righe:
+        x, y = numero(r.get('gt_target_x')), numero(r.get('gt_target_y'))
+        punti.append((float(r['t_sim']), x, y))
+
+    virata = [0.0] * len(righe)
+    direzione = [None] * len(righe)
+    for k in range(1, len(punti)):
+        (t0, x0, y0), (t1, x1, y1) = punti[k - 1], punti[k]
+        if None in (x0, y0, x1, y1) or t1 <= t0:
+            continue
+        direzione[k] = math.atan2(y1 - y0, x1 - x0)
+    for k in range(2, len(punti)):
+        if direzione[k] is None or direzione[k - 1] is None:
+            continue
+        dt = punti[k][0] - punti[k - 1][0]
+        if dt <= 0:
+            continue
+        d = (direzione[k] - direzione[k - 1] + math.pi) % (2 * math.pi) - math.pi
+        virata[k] = abs(d) / dt
+
+    veloce = []
+    for k, r in enumerate(righe):
+        x0, y0 = punti[k - 1][1:] if k else (None, None)
+        x1, y1 = punti[k][1:]
+        v = 0.0
+        if k and None not in (x0, y0, x1, y1):
+            dt = punti[k][0] - punti[k - 1][0]
+            if dt > 0:
+                v = math.hypot(x1 - x0, y1 - y0) / dt
+        veloce.append(v > 1.0 and virata[k] < soglia_virata)
+    return veloce
+
+
+def _spezzato(x, y, maschera):
+    """Solo i punti dove la maschera e vera, con interruzioni fra i tratti."""
+    xx, yy = [], []
+    dentro = False
+    for k in range(len(x)):
+        if maschera[k] and x[k] is not None and y[k] is not None:
+            xx.append(x[k])
+            yy.append(y[k])
+            dentro = True
+        elif dentro:
+            xx.append(float('nan'))
+            yy.append(float('nan'))
+            dentro = False
+    return xx, yy
+
+
+def _frecce(ax, x, y, colore, quante=4):
+    """Qualche punta di freccia lungo il percorso: senza, non si sa da che
+    parte scorre il tempo."""
+    validi = [(a, b) for a, b in zip(x, y) if a is not None and b is not None]
+    if len(validi) < 20:
+        return
+    passo = len(validi) // (quante + 1)
+    for k in range(passo, len(validi) - 1, passo):
+        (x0, y0), (x1, y1) = validi[k - 1], validi[k]
+        if math.hypot(x1 - x0, y1 - y0) < 0.5:
+            continue
+        ax.annotate('', xy=(x1, y1), xytext=(x0, y0),
+                    arrowprops=dict(arrowstyle='-|>', color=colore,
+                                    linewidth=0, mutation_scale=14,
+                                    shrinkA=0, shrinkB=0, alpha=0.9))
+
+
+def figura_percorsi(righe, uscita):
+    """Ricerca ed evasione, in pianta.
+
+    Un solo volo, dall'alto: il circuito di pattugliamento, l'orbita del
+    bersaglio, le sue fughe in linea retta, l'inseguimento del velivolo, la
+    perdita e la ricerca che lo ritrova.
+    """
+    dx = [numero(r.get('gt_drone_x')) for r in righe]
+    dy = [numero(r.get('gt_drone_y')) for r in righe]
+    tx = [numero(r.get('gt_target_x')) for r in righe]
+    ty = [numero(r.get('gt_target_y')) for r in righe]
+    in_ricerca = [r.get('fase') == 'RICERCA' for r in righe]
+    in_fuga = maschera_evasione(righe)
+
+    fig, ax = plt.subplots(figsize=(8.6, 8.6))
+
+    # --- circuito di pattugliamento, come guida -----------------------------
+    circuito = [(0, 0), (150, 0), (150, 150), (0, 150), (0, 0)]
+    ax.plot([p[0] for p in circuito], [p[1] for p in circuito],
+            color=GRIGLIA, linewidth=1.4, zorder=1)
+    for wx, wy in circuito[:-1]:
+        ax.plot([wx], [wy], marker='s', markersize=5, markerfacecolor=SUPERFICIE,
+                markeredgecolor=ASSE, markeredgewidth=1.2, zorder=2)
+    ax.annotate('circuito di pattugliamento\n150 × 150 m a 50 m di quota',
+                xy=(75, 60), ha='center', va='center', fontsize=8,
+                color=SPENTO)
+
+    # --- percorsi: tinta = chi, intensita = in che stato --------------------
+    ax.plot(tx, ty, color=ARANCIO, linewidth=1.5, alpha=0.35, zorder=3)
+    ax.plot(dx, dy, color=BLU, linewidth=1.5, alpha=0.35, zorder=3)
+    ax.plot(*_spezzato(tx, ty, in_fuga), color=ARANCIO, linewidth=2.6,
+            zorder=5, solid_capstyle='round')
+    ax.plot(*_spezzato(dx, dy, in_ricerca), color=BLU, linewidth=2.6,
+            zorder=6, solid_capstyle='round')
+    _frecce(ax, tx, ty, ARANCIO)
+    _frecce(ax, dx, dy, BLU)
+
+    # --- eventi -------------------------------------------------------------
+    def punto(k, colore, testo, dxx, dyy):
+        if dx[k] is None:
+            return
+        ax.plot([dx[k]], [dy[k]], marker='o', markersize=8, color=colore,
+                markeredgecolor=SUPERFICIE, markeredgewidth=2, zorder=8)
+        ax.annotate(testo, xy=(dx[k], dy[k]), xytext=(dxx, dyy),
+                    textcoords='offset points', fontsize=8.5,
+                    color=SECONDARIO, zorder=9)
+
+    for k in range(1, len(righe)):
+        prima, dopo = righe[k - 1].get('fase'), righe[k].get('fase')
+        if prima == 'PATTUGLIAMENTO' and dopo == 'AGGANCIO':
+            punto(k, BLU, 'bersaglio agganciato', 10, -4)
+        elif prima == 'AGGANCIO' and dopo == 'RICERCA':
+            punto(k, BLU, 'bersaglio perso:\ninizia la ricerca', 16, -34)
+            if tx[k] is not None:
+                ax.plot([dx[k], tx[k]], [dy[k], ty[k]], color=SPENTO,
+                        linewidth=1.0, alpha=0.7, zorder=4)
+                ax.annotate('%.0f m fra i due\nalla perdita'
+                            % math.hypot(dx[k] - tx[k], dy[k] - ty[k]),
+                            xy=((dx[k] + tx[k]) / 2, (dy[k] + ty[k]) / 2),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=8, color=SPENTO, zorder=9)
+        elif prima == 'RICERCA' and dopo == 'AGGANCIO':
+            punto(k, BLU, 'riagganciato', -86, 14)
+
+    for serie_x, serie_y, colore, testo in ((dx, dy, BLU, 'decollo'),
+                                            (tx, ty, ARANCIO, 'bersaglio,\npartenza')):
+        primo = next((k for k in range(len(serie_x)) if serie_x[k] is not None),
+                     None)
+        if primo is not None:
+            ax.plot([serie_x[primo]], [serie_y[primo]], marker='o',
+                    markersize=6, color=colore, markeredgecolor=SUPERFICIE,
+                    markeredgewidth=2, zorder=8)
+            ax.annotate(testo, xy=(serie_x[primo], serie_y[primo]),
+                        xytext=(8, 6), textcoords='offset points',
+                        fontsize=8, color=SECONDARIO, zorder=9)
+
+    ax.set_aspect('equal')
+    ax.set_xlabel('est (m)')
+    ax.set_ylabel('nord (m)')
+    ax.set_title('Ricerca ed evasione, viste dall’alto', loc='left',
+                 fontsize=12, fontweight='semibold', pad=44)
+    ax.set_axisbelow(True)
+    ax.grid(True)
+    for lato in ('top', 'right'):
+        ax.spines[lato].set_visible(False)
+    for lato in ('left', 'bottom'):
+        ax.spines[lato].set_color(ASSE)
+
+    ax.legend(handles=[
+        Line2D([], [], color=BLU, linewidth=1.5, alpha=0.35,
+               label='velivolo: pattugliamento e inseguimento'),
+        Line2D([], [], color=BLU, linewidth=2.6, label='velivolo: in RICERCA'),
+        Line2D([], [], color=ARANCIO, linewidth=1.5, alpha=0.35,
+               label='bersaglio: orbita di pattuglia'),
+        Line2D([], [], color=ARANCIO, linewidth=2.6,
+               label='bersaglio: in fuga a 15 m/s'),
+    ], loc='lower left', bbox_to_anchor=(0.0, 1.02), ncols=2, fontsize=8.5,
+        labelcolor=SECONDARIO, borderaxespad=0.0)
+
+    fig.text(0.01, 0.012,
+             'Percorsi veri letti da Gazebo, una prova intera (%.0f s simulati). '
+             'La fuga e distinta dall’orbita per tasso di virata — 0.00 contro '
+             '0.25 rad/s — e non per velocità, che sui due moti si sovrappone.'
+             % (float(righe[-1]['t_sim']) - float(righe[0]['t_sim'])),
+             fontsize=7, color=SPENTO)
+    fig.tight_layout()
+    for testo in fig.texts:
+        testo.set_y(-0.018)
+    fig.savefig(uscita, dpi=200, bbox_inches='tight', pad_inches=0.22)
+    plt.close(fig)
+    print('scritto', uscita)
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -567,6 +758,9 @@ def main(argv):
     stile()
     figura_stima(tratto, os.path.join(cartella, 'kalman_stima.png'))
     figura_errore(tratto, os.path.join(cartella, 'kalman_errore.png'))
+    # I percorsi usano la prova INTERA: la finestra ristretta serve a leggere
+    # il filtro, qui invece il soggetto e il volo dall'inizio alla fine.
+    figura_percorsi(righe, os.path.join(cartella, 'ricerca_evasione.png'))
     return 0
 
 
