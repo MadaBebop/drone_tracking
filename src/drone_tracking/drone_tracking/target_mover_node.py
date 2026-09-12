@@ -84,19 +84,11 @@ class TargetMoverNode(Node):
         self.velocita_angolare = parametro(
             self, 'velocita_angolare', 0.25)   # rad/s
 
-        # Parametri evasione. Il limite non è la velocità massima del drone
-        # ma l'errore a regime del controllo proporzionale, che vale circa
-        # `velocita_bersaglio / kp`: più il bersaglio è veloce, più il drone lo
-        # insegue da lontano, finché non esce dall'inquadratura.
-        #
-        # La fuga parte da ferma e accelera: prima la velocità veniva applicata
-        # intera al primo istante, uno scalino sia in modulo sia in direzione
-        # rispetto al moto tangenziale dell'orbita. Un veicolo che scappa
-        # accelera, e la rampa dà al drone qualche secondo per reagire prima che
-        # il bersaglio sia a piena velocità.
-        # 15 m/s sono 54 km/h: la fuga di un veicolo su strada sterrata, non
-        # piu quella di un pedone. L'accelerazione di 3 m/s^2 porta a regime in
-        # cinque secondi, che e il comportamento di un mezzo leggero.
+        # La fuga parte da ferma e accelera, come farebbe un veicolo: applicare
+        # la velocita intera al primo istante sarebbe uno scalino sia in modulo
+        # sia in direzione rispetto al moto tangenziale dell'orbita. Cio che
+        # rende difficile l'inseguimento non e la velocita massima del drone ma
+        # l'errore a regime del controllo, che vale velocita/kp.
         self.vel_evasione = parametro(
             self, 'vel_evasione', 15.0)    # m/s a regime, ~54 km/h
         self.accel_evasione = parametro(
@@ -104,13 +96,9 @@ class TargetMoverNode(Node):
         self.dir_evasione_x    = 0.0
         self.dir_evasione_y    = 0.0
         self.tempo_evasione    = 0.0
-        # A 8.3 m/s venti secondi porterebbero il bersaglio a 160 m, fuori da
-        # qualunque possibilita di recupero. Dieci bastano a mettere alla prova
-        # l'inseguimento senza trasformarlo in una fuga senza ritorno.
-        # Venti secondi a 15 m/s portano il bersaglio a circa 260 m dal punto
-        # di partenza: molto piu del semicampo inquadrato, quindi la fuga mette
-        # davvero alla prova l'inseguimento invece di svolgersi tutta dentro
-        # una sola inquadratura.
+        # Venti secondi a 15 m/s portano il bersaglio a ~260 m, molto oltre il
+        # semicampo inquadrato: la fuga mette davvero alla prova l'inseguimento
+        # invece di svolgersi tutta dentro una sola inquadratura.
         self.durata_evasione_s = parametro(
             self, 'durata_evasione_s', 20.0)   # s  -> ~260 m di fuga
 
@@ -232,16 +220,11 @@ class TargetMoverNode(Node):
 
             if self.tempo_evasione >= self.durata_evasione_s:
                 self.fase = FaseBersaglio.PATTUGLIO
-                # L'orbita riprende dal punto in cui la fuga si e fermata.
-                # Prima il centro veniva messo sulla posizione corrente con
-                # t = 0, e la posizione successiva valeva centro + raggio:
-                # un salto istantaneo di 3 metri, cioe l'intero raggio
-                # dell'orbita. Il tracker lo vedeva come uno spostamento
-                # impossibile del bersaglio e poteva perdere l'aggancio per un
-                # artefatto del simulatore, non per un limite del controllo.
-                # Mettendo il centro dietro la direzione di fuga e la fase
-                # dell'orbita pari a quella direzione, la posizione resta
-                # invariata e il moto prosegue senza strappi.
+                # Il centro va messo DIETRO la direzione di fuga, con la fase
+                # pari a quella direzione: cosi la posizione resta invariata e
+                # il moto prosegue senza strappi. Metterlo sulla posizione
+                # corrente con t = 0 produrrebbe un salto pari al raggio, che
+                # il tracker leggerebbe come un movimento impossibile.
                 self.t = math.atan2(self.dir_evasione_y, self.dir_evasione_x)
                 self.centro_x = self.pos_x - self.raggio * math.cos(self.t)
                 self.centro_y = self.pos_y - self.raggio * math.sin(self.t)

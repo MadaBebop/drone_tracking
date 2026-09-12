@@ -1,160 +1,168 @@
 #!/usr/bin/env python3
+"""Filtro di Kalman sulla posizione del bersaglio nell'immagine.
+
+Stato [x, y, vx, vy] in coordinate normalizzate, modello a velocita quasi
+costante. Tre scelte che lo distinguono dal caso da manuale:
+
+- il moto del velivolo entra come INGRESSO NOTO, non come rumore di processo.
+  La posizione nell'immagine cambia per due motivi, il bersaglio che si muove e
+  il velivolo che si muove, e il secondo e misurato da MAVROS: trattarlo come
+  rumore costringeva il filtro a spiegare con l'incertezza cio che gia sapeva.
+  Con l'ingresso noto la velocita stimata diventa quella propria del bersaglio;
+  senza, era la relativa, e chi voleva l'assoluta doveva sommarci quella del
+  velivolo ottenendo una stima con errore pari al segnale (10.8 m/s contro 10.0)
+- ogni misura passa un test di plausibilita (distanza di Mahalanobis sulla
+  covarianza dell'innovazione) prima di essere usata. Il disturbo non e
+  gaussiano — il 30% dei messaggi e una perdita totale — e un filtro gaussiano
+  senza rifiuto pesa un valore anomalo invece di scartarlo
+- il filtro pubblica il proprio NIS, che permette di verificare Q e R senza
+  verita a terra: e la sola via percorribile su un velivolo vero
+"""
 import math
+
+import numpy as np
 import rclpy
+from geometry_msgs.msg import Point, PoseStamped, TwistStamped
 from rclpy.node import Node
-from geometry_msgs.msg import Point
-from std_msgs.msg import Bool, String, Float32
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool, Float32, Float64, String
+
 from drone_tracking.mission_node import FaseMissione  # type: ignore
 from drone_tracking.parametri import parametro  # type: ignore
-import numpy as np
+
+# Semicampo della telecamera, come in controller_node.
+TAN_O = 1.0      # orizzontale, 90 gradi
+TAN_V = 0.750    # verticale
+
+# Esiti possibili della correzione.
+USATA = 'usata'
+RIFIUTATA = 'rifiutata'
+RIACQUISITO = 'riacquisito'
+ASSENTE = 'assente'
+
 
 class TrackerNode(Node):
     def __init__(self):
         super().__init__('tracker_node')
 
-        self.noise_sub = self.create_subscription(
-            Float32, '/rf/noise_level',
-            self.on_noise_level, 10)
+        qos_mavros = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                                history=HistoryPolicy.KEEP_LAST, depth=1)
 
-        self.sub = self.create_subscription(
-            Point, '/target/jammed_position', self.on_detection, 10)
+        self.create_subscription(Float32, '/rf/noise_level',
+                                 self.on_noise_level, 10)
+        self.create_subscription(Point, '/target/jammed_position',
+                                 self.on_detection, 10)
+        self.create_subscription(Bool, '/tracker/reset', self.on_reset, 10)
+        self.create_subscription(String, '/mission/stato',
+                                 self.on_stato_missione, 10)
 
-        self.pub = self.create_publisher(
-            Point, '/target/tracked_position', 10)
+        # Moto del velivolo: e l'ingresso noto della predizione.
+        self.create_subscription(TwistStamped,
+                                 '/mavros/local_position/velocity_local',
+                                 self.on_velocita_drone, qos_mavros)
+        self.create_subscription(PoseStamped, '/mavros/local_position/pose',
+                                 self.on_posa, qos_mavros)
+        self.create_subscription(Float64, '/mavros/global_position/rel_alt',
+                                 self.on_quota, qos_mavros)
 
-        # Velocita stimata dal filtro, finora calcolata e mai usata da nessuno.
-        # E in coordinate normalizzate d'immagine al secondo, ed e RELATIVA: la
-        # posizione del bersaglio nell'immagine cambia anche quando a muoversi e
-        # il drone. Il campo z vale 1 quando la stima e utilizzabile.
-        self.pub_vel = self.create_publisher(
-            Point, '/target/tracked_velocity', 10)
+        self.pub = self.create_publisher(Point, '/target/tracked_position', 10)
+        # Velocita del bersaglio in coordinate immagine al secondo. Con
+        # l'ingresso noto attivo e la sua velocita PROPRIA, non piu relativa al
+        # velivolo. z vale 1 quando la stima e utilizzabile.
+        self.pub_vel = self.create_publisher(Point, '/target/tracked_velocity', 10)
+        # Innovazione normalizzata: vale 2 in media se Q e R sono coerenti.
+        self.pub_nis = self.create_publisher(Float32, '/target/nis', 10)
 
-        self.reset_sub = self.create_subscription(
-            Bool, '/tracker/reset', self.on_reset, 10)
-
-        self.mission_sub = self.create_subscription(
-            String, '/mission/stato', self.on_stato_missione, 10)
-
-        # --- Filtro Kalman [x, y, vx, vy] ---
         self.stato_stimato = np.zeros((4, 1), dtype=np.float32)
+        self.incertezza_corrente = np.eye(4, dtype=np.float32)
 
-        # Il nodo è guidato dai messaggi, non da un timer: il suo ritmo è quello
-        # della telecamera, che varia col carico della macchina (misurato fra 5 e
-        # 13 Hz). Il dt viene quindi ricavato dai tempi reali fra due misure, non
-        # fissato a una costante.
-        self.dt_nominale = 0.1      # usato solo per la primissima misura
-        self.dt_min      = 0.02     # limiti di sicurezza: un dt anomalo
-        self.dt_max      = 0.5      # manderebbe in divergenza la predizione
+        # Il nodo e guidato dai messaggi, non da un timer: il ritmo e quello
+        # della telecamera, misurato fra 5 e 25 Hz secondo il carico.
+        self.dt_nominale = 0.1
+        self.dt_min = 0.02
+        self.dt_max = 0.5
         self.ultimo_istante = None
 
-        self.evoluzione_stato = np.array([
-            [1, 0, self.dt_nominale, 0               ],
-            [0, 1, 0,                self.dt_nominale],
-            [0, 0, 1,                0               ],
-            [0, 0, 0,                1               ]
-        ], dtype=np.float32)
+        self.evoluzione_stato = np.eye(4, dtype=np.float32)
+        self.mappa_osservazione = np.array([[1, 0, 0, 0],
+                                            [0, 1, 0, 0]], dtype=np.float32)
 
-        self.mappa_osservazione = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
-        ], dtype=np.float32)
-
-        self.livello_rumore = 0.0
-        
-        # Intensita del rumore di accelerazione del modello, in (unita
-        # normalizzate)^2/s^3. Non e piu una matrice costante: la matrice Q
-        # viene ricostruita a ogni predizione in funzione del dt effettivo, con
-        # la discretizzazione standard di un modello a velocita quasi costante
-        # (vedi _matrice_Q). Prima veniva sommata sempre la stessa Q qualunque
-        # fosse il tempo trascorso: al ritmo variabile della telecamera
-        # (misurato fra 5 e 13 Hz) lo stesso intervallo veniva penalizzato o
-        # premiato a caso, e i termini incrociati posizione-velocita, che in
-        # questo modello esistono, mancavano del tutto.
-        #
-        # Il valore e stato TARATO sulla verita a terra, non scelto per
-        # continuita. La prima versione usava 5.0, per riprodurre al dt
-        # nominale il termine di velocita della vecchia matrice costante: un
-        # argomento di continuita con una matrice che era essa stessa
-        # sbagliata. Il difetto e rimasto invisibile finche la velocita
-        # stimata non e servita a qualcuno — nessuno la leggeva — e si e
-        # manifestato quando la guida predittiva ha cominciato a usarla,
-        # comandando il doppio del necessario.
-        #
-        # Confrontando la stima con la velocita reale del bersaglio letta dal
-        # simulatore, la pendenza della regressione vale:
-        #     q = 5.00  ->  2.36 in avanti, 1.51 lateralmente (gonfiata)
-        #     q = 0.50  ->  1.03 e 0.86                       (corretta)
-        #     q = 0.05  ->  0.55 e 0.55                       (troppo lenta)
-        # La correlazione resta intorno a 0.6 in tutti e tre i casi: quella e
-        # la qualita intrinseca della misura, e non dipende da questo valore.
+        # Intensita del rumore di accelerazione, in (unita normalizzate)^2/s^3.
+        # Tarata sull'ERRORE della velocita stimata e non sulla sua distorsione:
+        # il valore precedente, 0.5, rendeva la stima non distorta ma rumorosa,
+        # con 9.3 m/s di errore contro un bersaglio che ne percorre 10. A 0.01
+        # l'errore scende a 3.0, vicino al limite di 2.6 che il rumore di misura
+        # e la manovrabilita del bersaglio impongono (scripts/, spazzata
+        # offline sul filtro vero).
         self.intensita_rumore_accel = parametro(
-            self, 'intensita_rumore_accel', 0.5)
-        # Incertezza della misura, che cresce con il rumore dichiarato sul
-        # datalink: e il meccanismo con cui il filtro si fida meno del
-        # rilevamento durante il jamming (vedi on_noise_level).
-        self.rumore_sensore_base = parametro(self, 'rumore_sensore_base', 0.05)
-        self.rumore_sensore_max  = parametro(self, 'rumore_sensore_max', 2.0)
+            self, 'intensita_rumore_accel', 0.01)
+
+        # R cresce con il rumore dichiarato sul datalink: e il meccanismo con
+        # cui il filtro si fida meno della misura quando la misura vale meno.
+        #
+        # Il valore di base e MISURATO e non scelto: e la varianza della parte
+        # bianca dello scarto fra rilevamento e proiezione della posizione vera
+        # (`metriche.py rumore`). Lo 0.05 precedente valeva tre volte tanto, e
+        # il NIS lo segnalava — un filtro che dichiara piu incertezza di quanta
+        # ne abbia corregge meno di quanto potrebbe.
+        self.rumore_sensore_base = parametro(self, 'rumore_sensore_base', 0.016)
+        self.rumore_sensore_max = parametro(self, 'rumore_sensore_max', 2.0)
+        self.livello_rumore = 0.0
         self.incertezza_sensore = (np.eye(2, dtype=np.float32)
                                    * self.rumore_sensore_base)
-        self.incertezza_corrente = np.eye(4, dtype=np.float32)
+
+        # Soglia del test di plausibilita, in unita di chi-quadro a 2 gradi di
+        # liberta: 9.21 lascia passare il 99% delle misure legittime. A zero il
+        # test e disattivato.
+        self.soglia_gating = parametro(self, 'soglia_gating', 9.21)
+        # Un filtro che rifiuta tutto diverge in silenzio, convinto di sapere
+        # dove sia il bersaglio. Dopo qualche rifiuto di fila la spiegazione
+        # piu probabile non e che le misure siano sbagliate ma che lo sia lo
+        # stato: si riparte dalla misura.
+        self.max_rifiuti = parametro(self, 'max_rifiuti_consecutivi', 5)
+        self.rifiuti_consecutivi = 0
+
+        # Quanti fotogrammi senza segnale tollerare continuando a pubblicare la
+        # predizione, cosi che il controllo non si fermi a ogni buco.
+        self.soglia_perdita = parametro(self, 'soglia_perdita', 15)
 
         self.bersaglio_acquisito = False
         self.frame_senza_segnale = 0
-        # Quanti frame senza segnale tollerare continuando a pubblicare la
-        # predizione. Alzata da 5 a 15 (~1.4 s a 11 Hz): il controller insegue
-        # la stima del filtro, quindi finche questa resta valida il drone
-        # continua a rincorrere il bersaglio invece di fermarsi. Serve nei casi
-        # difficili, come una fuga nella direzione opposta a quella in cui il
-        # drone si sta muovendo, dove il bersaglio esce dall'inquadratura per
-        # qualche decimo di secondo mentre il velivolo inverte la marcia.
-        self.soglia_perdita = parametro(self, 'soglia_perdita', 15)
-
-        # Ultima area valida del contorno. Serve a marcare come utilizzabili le
-        # posizioni predette durante una perdita di segnale: `z` è il flag di
-        # validità letto a valle, e ricopiare lo zero del messaggio in ingresso
-        # le farebbe scartare come "bersaglio assente".
         self.ultima_area = 0.0
+
+        # Stato del velivolo per l'ingresso noto. Finche non arriva, l'ingresso
+        # vale zero e il filtro si comporta come prima.
+        self.vel_drone = None
+        self.istante_vel_drone = None
+        self.yaw = 0.0
+        self.quota = None
+        self.timeout_stato_s = parametro(self, 'timeout_stato_drone_s', 1.0)
+        self.ingresso_applicato = False
 
         self.get_logger().info('TrackerNode avviato — filtro Kalman attivo')
 
-    def _matrice_Q(self, dt):
-        """Rumore di processo per un modello a velocita quasi costante.
-
-        Un'accelerazione ignota di intensita q, integrata su un intervallo dt,
-        produce sulla posizione una varianza q*dt^3/3, sulla velocita q*dt e fra
-        le due una covarianza q*dt^2/2. Lo stato e [x, y, vx, vy], quindi i due
-        assi occupano righe alternate e i termini incrociati stanno fuori dalla
-        diagonale.
-        """
-        q = self.intensita_rumore_accel
-        p = q * dt ** 3 / 3.0    # posizione
-        c = q * dt ** 2 / 2.0    # posizione-velocita
-        v = q * dt               # velocita
-        return np.array([
-            [p, 0, c, 0],
-            [0, p, 0, c],
-            [c, 0, v, 0],
-            [0, c, 0, v],
-        ], dtype=np.float32)
-
-    def _calcola_dt(self):
-        """Intervallo reale trascorso dall'ultima misura, con clamp di sicurezza."""
-        adesso = self.get_clock().now().nanoseconds / 1e9
-        if self.ultimo_istante is None:
-            self.ultimo_istante = adesso
-            return self.dt_nominale
-        dt = adesso - self.ultimo_istante
-        self.ultimo_istante = adesso
-        return float(min(max(dt, self.dt_min), self.dt_max))
-
+    # ------------------------------------------------------------ ingressi
     def on_noise_level(self, msg: Float32):
         self.livello_rumore = msg.data
-        r_dinamico = (self.rumore_sensore_base
-                      + (self.rumore_sensore_max - self.rumore_sensore_base)
-                      * self.livello_rumore)
-        self.incertezza_sensore = np.eye(2, dtype=np.float32) * r_dinamico
-        # self.get_logger().info(f'R adattivo: {r_dinamico:.3f} (rumore RF: {self.livello_rumore:.1f})')
-        
+        r = (self.rumore_sensore_base
+             + (self.rumore_sensore_max - self.rumore_sensore_base)
+             * self.livello_rumore)
+        self.incertezza_sensore = np.eye(2, dtype=np.float32) * r
+
+    def on_velocita_drone(self, msg: TwistStamped):
+        self.istante_vel_drone = self.get_clock().now().nanoseconds / 1e9
+        self.vel_drone = (msg.twist.linear.x, msg.twist.linear.y)
+
+    def on_posa(self, msg: PoseStamped):
+        q = msg.pose.orientation
+        self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                              1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def on_quota(self, msg: Float64):
+        # Stessa sorgente di quota usata dal controllo: la conversione fra
+        # coordinate immagine e metri deve essere la stessa nei due nodi.
+        self.quota = msg.data
+
     def on_stato_missione(self, msg: String):
         if FaseMissione.ATTESA.value in msg.data:
             self._reset()
@@ -163,6 +171,63 @@ class TrackerNode(Node):
         if msg.data:
             self._reset()
             self.get_logger().info('Tracker resettato')
+
+    # -------------------------------------------------------------- modello
+    def _matrice_Q(self, dt):
+        """Rumore di processo di un modello a velocita quasi costante.
+
+        Un'accelerazione ignota di intensita q su un intervallo dt produce
+        varianza q*dt^3/3 sulla posizione, q*dt sulla velocita e covarianza
+        q*dt^2/2 fra le due.
+        """
+        q = self.intensita_rumore_accel
+        p, c, v = q * dt ** 3 / 3.0, q * dt ** 2 / 2.0, q * dt
+        return np.array([[p, 0, c, 0],
+                         [0, p, 0, c],
+                         [c, 0, v, 0],
+                         [0, c, 0, v]], dtype=np.float32)
+
+    def _ingresso_noto(self, dt):
+        """Spostamento d'immagine dovuto al moto del VELIVOLO in dt.
+
+        Un bersaglio fermo scivola nell'immagine quando il velivolo trasla, e
+        di quanto e calcolabile: la traslazione va portata in assi velivolo con
+        l'imbardata e divisa per l'impronta a terra, che vale quota per la
+        tangente del semicampo. Restituisce (dx, dy) in unita normalizzate,
+        oppure None se il moto del velivolo non e noto o la quota non e
+        utilizzabile: in quel caso il
+        filtro torna al comportamento precedente, e la velocita di stato torna
+        a essere relativa invece che propria del bersaglio.
+        """
+        if self.vel_drone is None or self.quota is None or self.quota < 5.0:
+            return None
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        if (self.istante_vel_drone is None
+                or adesso - self.istante_vel_drone > self.timeout_stato_s):
+            return None
+
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        avanti = (self.vel_drone[0] * c + self.vel_drone[1] * s) * dt
+        laterale = (-self.vel_drone[0] * s + self.vel_drone[1] * c) * dt
+        # Segni: il velivolo che avanza spinge il bersaglio verso il fondo
+        # dell'inquadratura, dove y e positivo.
+        return (laterale / (self.quota * TAN_O),
+                avanti / (self.quota * TAN_V))
+
+    def _calcola_dt(self):
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        if self.ultimo_istante is None:
+            self.ultimo_istante = adesso
+            return self.dt_nominale
+        dt = adesso - self.ultimo_istante
+        self.ultimo_istante = adesso
+        return float(min(max(dt, self.dt_min), self.dt_max))
+
+    # ------------------------------------------------------------- uscite
+    def _pubblica_posizione(self, area):
+        self.pub.publish(Point(x=float(self.stato_stimato[0].item()),
+                               y=float(self.stato_stimato[1].item()),
+                               z=float(area)))
 
     def _pubblica_velocita(self, valida):
         stima = Point()
@@ -175,124 +240,127 @@ class TrackerNode(Node):
     def _reset(self):
         self.bersaglio_acquisito = False
         self.frame_senza_segnale = 0
+        self.rifiuti_consecutivi = 0
         self.stato_stimato = np.zeros((4, 1), dtype=np.float32)
         self.incertezza_corrente = np.eye(4, dtype=np.float32)
         self.ultima_area = 0.0
         # Alla ripresa il primo dt ripartirebbe dal tempo trascorso durante la
-        # perdita, che non è un intervallo di campionamento valido.
+        # perdita, che non e un intervallo di campionamento valido.
         self.ultimo_istante = None
         self._pubblica_velocita(False)
 
-    def on_detection(self, msg: Point):
-        segnale_presente = not (msg.z == 0.0)
+    def _acquisisci(self, msg):
+        """Fa ripartire lo stato dalla misura. Non pubblica: lo fa il chiamante."""
+        self.stato_stimato = np.array([[msg.x], [msg.y], [0.0], [0.0]],
+                                      dtype=np.float32)
+        self.incertezza_corrente = np.eye(4, dtype=np.float32)
+        self.bersaglio_acquisito = True
+        self.rifiuti_consecutivi = 0
+        self.frame_senza_segnale = 0
+        self.ultima_area = msg.z
+        self._calcola_dt()
 
-        if not self.bersaglio_acquisito and segnale_presente:
-            self.stato_stimato = np.array(
-                [[msg.x], [msg.y], [0.0], [0.0]], dtype=np.float32)
-            self.bersaglio_acquisito = True
-            self.ultima_area = msg.z
-            self._calcola_dt()   # inizializza il riferimento temporale
-            self.get_logger().info('Bersaglio acquisito')
-            # La posizione appena acquisita va pubblicata subito: uscire senza
-            # farlo faceva perdere un messaggio a ogni riacquisizione, e sotto
-            # jamming le riacquisizioni sono continue.
-            self.pub.publish(Point(x=float(msg.x), y=float(msg.y), z=float(msg.z)))
-            # Alla prima acquisizione la velocita non e ancora stimata: dirlo
-            # esplicitamente evita che il controllo usi uno zero come se fosse
-            # una misura.
-            self._pubblica_velocita(False)
-            return
+    # ---------------------------------------------------------- ciclo del filtro
+    def on_detection(self, msg: Point):
+        segnale_presente = msg.z != 0.0
 
         if not self.bersaglio_acquisito:
-            # Continua a pubblicare coordinate nulle se non ha ancora agganciato nulla
-            msg_vuoto = Point(x=0.0, y=0.0, z=0.0)
-            self.pub.publish(msg_vuoto)
+            if segnale_presente:
+                self._acquisisci(msg)
+                self.get_logger().info('Bersaglio acquisito')
+                # Pubblicare subito evita di perdere un messaggio a ogni
+                # riacquisizione, e sotto jamming sono continue. La velocita
+                # non e ancora stimata, e dirlo evita che il controllo usi uno
+                # zero come se fosse una misura.
+                self._pubblica_posizione(msg.z)
+                self._pubblica_velocita(False)
+            else:
+                self.pub.publish(Point())
             return
 
-        # PREDIZIONE KALMAN — dt aggiornato al ritmo effettivo della catena
         dt = self._calcola_dt()
         self.evoluzione_stato[0, 2] = dt
         self.evoluzione_stato[1, 3] = dt
 
         self.stato_stimato = self.evoluzione_stato @ self.stato_stimato
+        ingresso = self._ingresso_noto(dt)
+        self.ingresso_applicato = ingresso is not None
+        if ingresso is not None:
+            self.stato_stimato[0] += ingresso[0]
+            self.stato_stimato[1] += ingresso[1]
         self.incertezza_corrente = (
             self.evoluzione_stato @ self.incertezza_corrente
-            @ self.evoluzione_stato.T + self._matrice_Q(dt)
-        )
+            @ self.evoluzione_stato.T + self._matrice_Q(dt))
 
-        if segnale_presente:
-            self.frame_senza_segnale = 0
-            misura = np.array([[msg.x], [msg.y]], dtype=np.float32)
+        esito = self._aggiorna(msg) if segnale_presente else ASSENTE
 
-            S = (self.mappa_osservazione @ self.incertezza_corrente
-                 @ self.mappa_osservazione.T + self.incertezza_sensore)
-
-            guadagno_kalman = (self.incertezza_corrente
-                               @ self.mappa_osservazione.T
-                               @ np.linalg.inv(S))
-
-            errore = misura - self.mappa_osservazione @ self.stato_stimato
-            self.stato_stimato = self.stato_stimato + guadagno_kalman @ errore
-            self.incertezza_corrente = (
-                (np.eye(4) - guadagno_kalman @ self.mappa_osservazione)
-                @ self.incertezza_corrente
-            )
-
-            # Qui la velocità stimata veniva moltiplicata per 0.6 a ogni
-            # aggiornamento, per "ridurre predizioni errate". Rimosso: era uno
-            # smorzamento applicato allo stato senza toccare la covarianza
-            # corrispondente, cioè il filtro dichiarava una fiducia che non
-            # corrispondeva più alla stima, e la coerenza fra le due è l'unica
-            # cosa che rende ottimo un filtro di Kalman. Peggio, essendo
-            # applicato a ogni misura, il fattore si componeva: dopo dieci
-            # aggiornamenti la velocità era ridotta a 0.6^10, cioè lo 0.6% del
-            # valore stimato, e la predizione durante una perdita di segnale
-            # restava praticamente ferma sull'ultima posizione invece di
-            # estrapolare il moto del bersaglio.
-            # Lo stesso effetto — stima di velocità meno nervosa — si ottiene
-            # ora per la via corretta, cioè dall'intensità di rumore del modello
-            # in _matrice_Q, che governa quanto la velocità può cambiare fra due
-            # misure e aggiorna di conseguenza anche l'incertezza.
-
+        if esito == USATA:
             self.ultima_area = msg.z
+            self.frame_senza_segnale = 0
+            self._pubblica_posizione(msg.z)
+            # Senza ingresso noto la velocita di stato e relativa al velivolo e
+            # non propria del bersaglio: e una grandezza diversa, e chi la legge
+            # non ha modo di accorgersene. Meglio non pubblicarla.
+            self._pubblica_velocita(self.ingresso_applicato)
+            return
 
-            # Pubblica la posizione stimata aggiornata
-            posizione_stimata = Point()
-            posizione_stimata.x = float(self.stato_stimato[0].item())
-            posizione_stimata.y = float(self.stato_stimato[1].item())
-            posizione_stimata.z = float(msg.z)
-            self.pub.publish(posizione_stimata)
-            self._pubblica_velocita(True)
-        else:
-            self.frame_senza_segnale += 1
-            if self.frame_senza_segnale > self.soglia_perdita:
-                self._reset()
-                self.get_logger().warn('Bersaglio perso — reset tracker')
-                
-                # Invia il segnale di stop/perdita a mission_node e controller_node
-                msg_perso = Point(x=0.0, y=0.0, z=0.0)
-                self.pub.publish(msg_perso)
-                return
-            
-            # Pubblica la predizione per tollerare micro-interruzioni.
-            # `z` porta l'ultima area valida, non lo zero del messaggio in
-            # ingresso: la stima è utilizzabile e va marcata come tale.
-            posizione_stimata = Point()
-            posizione_stimata.x = float(self.stato_stimato[0].item())
-            posizione_stimata.y = float(self.stato_stimato[1].item())
-            posizione_stimata.z = float(self.ultima_area)
-            self.pub.publish(posizione_stimata)
-            # La POSIZIONE predetta e utilizzabile e va pubblicata: e cio che
-            # tollera le micro-interruzioni. La VELOCITA no. Durante la
-            # predizione non arriva alcuna informazione nuova sul moto, e lo
-            # stato di velocita resta congelato all'ultimo valore stimato:
-            # pubblicarlo come valido significa spacciare per misure ripetute
-            # cio che e una sola misura ripetuta molte volte. Chi ne fa una
-            # media la trova immobile, e il filtraggio si annulla proprio
-            # nell'istante che precede la perdita, l'unico in cui serve.
+        if esito == RIACQUISITO:
+            # Lo stato riparte dalla misura: la posizione e buona, la velocita
+            # non ancora.
+            self._pubblica_posizione(msg.z)
             self._pubblica_velocita(False)
-            # self.get_logger().info(
-            #     f'Tentativo predizione — Frame persi: {self.frame_senza_segnale}/{self.soglia_perdita}')
+            return
+
+        # Nessuna misura utilizzabile: o non e arrivata, o non era plausibile.
+        self.frame_senza_segnale += 1
+        if self.frame_senza_segnale > self.soglia_perdita:
+            self._reset()
+            self.get_logger().warn('Bersaglio perso — reset tracker')
+            self.pub.publish(Point())
+            return
+
+        # La POSIZIONE predetta e utilizzabile e va pubblicata: e cio che
+        # tollera le micro-interruzioni. La VELOCITA no: durante la predizione
+        # non arriva informazione nuova sul moto, e lo stato resta congelato
+        # all'ultimo valore. Pubblicarlo come valido significa spacciare per
+        # misure ripetute una sola misura ripetuta molte volte.
+        self._pubblica_posizione(self.ultima_area)
+        self._pubblica_velocita(False)
+
+    def _aggiorna(self, msg):
+        """Correzione con la misura. Torna USATA, RIFIUTATA o RIACQUISITO."""
+        misura = np.array([[msg.x], [msg.y]], dtype=np.float32)
+        innovazione = misura - self.mappa_osservazione @ self.stato_stimato
+        S = (self.mappa_osservazione @ self.incertezza_corrente
+             @ self.mappa_osservazione.T + self.incertezza_sensore)
+        S_inv = np.linalg.inv(S)
+
+        # Innovazione normalizzata: quanto la misura sorprende il filtro,
+        # misurata nell'incertezza che il filtro stesso dichiara. Con due gradi
+        # di liberta vale 2 in media se Q e R sono coerenti con la realta, ed e
+        # la grandezza con cui si tarano senza verita a terra.
+        nis = float((innovazione.T @ S_inv @ innovazione).item())
+        self.pub_nis.publish(Float32(data=nis))
+
+        if 0.0 < self.soglia_gating < nis:
+            self.rifiuti_consecutivi += 1
+            if self.rifiuti_consecutivi <= self.max_rifiuti:
+                return RIFIUTATA
+            # Troppi rifiuti di fila: a sbagliare e lo stato, non le misure.
+            self.get_logger().warn(
+                'Misure rifiutate {} volte di fila — riacquisisco'.format(
+                    self.rifiuti_consecutivi))
+            self._acquisisci(msg)
+            return RIACQUISITO
+
+        self.rifiuti_consecutivi = 0
+        guadagno = self.incertezza_corrente @ self.mappa_osservazione.T @ S_inv
+        self.stato_stimato = self.stato_stimato + guadagno @ innovazione
+        self.incertezza_corrente = (
+            (np.eye(4, dtype=np.float32)
+             - guadagno @ self.mappa_osservazione) @ self.incertezza_corrente)
+        return USATA
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -304,6 +372,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

@@ -3,7 +3,7 @@ import math
 from statistics import median
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point, PoseStamped, Twist, TwistStamped
+from geometry_msgs.msg import Point, PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Float64, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -32,18 +32,17 @@ class ControllerNode(Node):
             Point, '/target/tracked_position', self.on_tracked, 10)
 
         # Velocita del bersaglio stimata dal filtro, in coordinate immagine al
-        # secondo e relativa al drone.
+        # secondo. E gia la sua velocita propria: il filtro riceve il moto del
+        # velivolo come ingresso noto.
         self.create_subscription(
             Point, '/target/tracked_velocity', self.on_velocita_stimata, 10)
 
         self.gps_sub = self.create_subscription(
             Bool, '/gps/jammed', self.on_gps_status, 10)
 
-        # Angoli comandati alla sospensione cardanica. Servono a sapere quanta
-        # parte dell'assetto e gia compensata meccanicamente: la compensazione
-        # analitica deve occuparsi solo del residuo. Se il gimbal non c'e,
-        # nessuno pubblica su questi topic, i valori restano zero e il calcolo
-        # torna identico a quello precedente.
+        # Angoli comandati al gimbal: dicono quanta parte dell'assetto e gia
+        # compensata meccanicamente, cosi la compensazione analitica si occupa
+        # del solo residuo. Senza gimbal restano zero e il calcolo non cambia.
         self.create_subscription(
             Float64, '/gimbal/roll/cmd_pos', self.on_gimbal_roll, 10)
         self.create_subscription(
@@ -55,25 +54,15 @@ class ControllerNode(Node):
             PoseStamped, '/mavros/local_position/pose',
             self.on_posa, qos_mavros)
 
-        # Velocita del velivolo nel frame locale ENU. Serve a ricostruire la
-        # velocita assoluta del bersaglio: quella stimata dal filtro e
-        # relativa, e senza questo termine il comando inseguirebbe una
-        # grandezza che dipende anche dal proprio moto.
-        self.create_subscription(
-            TwistStamped, '/mavros/local_position/velocity_local',
-            self.on_velocita_drone, qos_mavros)
-
         self.cmd_pub = self.create_publisher(
             Twist, '/drone/cmd_vel', 10)
 
         self.mavros_vel_pub = self.create_publisher(
             Twist, '/mavros/setpoint_velocity/cmd_vel_unstamped', 10)
 
-        # Stima del bersaglio nel frame del mondo: posizione e velocita in
-        # metri, non piu in coordinate immagine. Il controllo le calcola gia
-        # per il proprio comando, e pubblicarle evita che mission_node debba
-        # rifare la stessa conversione — due copie della stessa formula
-        # divergono al primo che ne corregge una sola.
+        # Stima del bersaglio nel mondo, in metri. Il controllo la calcola gia
+        # per il proprio comando: pubblicarla evita che la missione rifaccia la
+        # stessa conversione, e due copie divergono al primo che ne corregge una.
         self.stima_pub = self.create_publisher(
             Odometry, '/target/odometria', 10)
 
@@ -88,31 +77,9 @@ class ControllerNode(Node):
         self.gimbal_pitch   = 0.0
         self.posizione_drone = None
 
-        # --- Guida predittiva ---
-        # Con k = 1 il comando conterrebbe per intero la velocita stimata del
-        # bersaglio: a regime il drone la pareggerebbe invece di inseguirla, e
-        # l'errore residuo velocita/kp si annullerebbe. In teoria.
-        #
-        # Misurato, non paga. Contro un bersaglio in fuga a 5.5 m/s, con la
-        # stima del filtro gia corretta in scala:
-        #     k = 0.0  ->  84.0% di fotogrammi con bersaglio, mediana 3.92 m
-        #     k = 0.4  ->  77.6%                              mediana 4.21 m
-        #     k = 0.7  ->  82.0%                              mediana 4.06 m
-        #     k = 1.0  ->  74.0%                              mediana 6.42 m
-        # Lo zero e il punto migliore e i valori intermedi si equivalgono entro
-        # la dispersione fra prove ripetute.
-        #
-        # La ragione e la qualita della stima, non il termine in se: la
-        # correlazione fra velocita stimata e velocita vera del bersaglio vale
-        # circa 0.6, quindi poco piu di un terzo della varianza della stima e
-        # segnale. Un termine di anticipo somma l'intera stima al comando di
-        # velocita, rumore compreso, e quel rumore costa piu del ritardo che
-        # elimina. Per renderlo conveniente serve una stima migliore, non un
-        # guadagno diverso: la via naturale e dare al filtro la velocita del
-        # velivolo come ingresso noto, cosi che stimi direttamente la velocita
-        # assoluta del bersaglio invece di ricavarla per differenza.
-        #
-        # Il termine resta disponibile e parametrico, spento per default.
+        # Anticipo: pareggia la velocita del bersaglio invece di inseguirla.
+        # Spento perche misurato la stima era troppo rumorosa (README, 6.5); da
+        # riprovare ora che il filtro ha il moto del velivolo come ingresso.
         self.k_anticipo = parametro(self, 'k_anticipo', 0.0)
 
         # Finestra su cui si prende la mediana della velocita stimata. Un
@@ -126,11 +93,9 @@ class ControllerNode(Node):
         # scenario supera i 25 m/s, cioe 90 km/h. Una stima che lo supera e
         # impossibile e va rifiutata.
         self.vel_bersaglio_max = parametro(self, 'vel_bersaglio_max', 25.0)
-        # Per quanto una velocita stabilita da misure vere resta utilizzabile
-        # dopo che le misure sono cessate. Serve perche i fotogrammi che
-        # precedono la perdita sono predizioni, che non alimentano la finestra:
-        # senza memoria la velocita risulterebbe ignota proprio alla perdita,
-        # cioe nell'unico istante in cui la ricerca deve usarla.
+        # Per quanto una velocita stabilita da misure vere resta usabile dopo
+        # che le misure sono cessate: i fotogrammi prima della perdita sono
+        # predizioni, e senza memoria sarebbe ignota proprio quando serve.
         self.validita_velocita_s = parametro(self, 'validita_velocita_s', 2.0)
         # Campioni recenti: (istante, avanti, laterale).
         self.finestra_velocita = []
@@ -139,65 +104,26 @@ class ControllerNode(Node):
         self.vel_stimata_x = 0.0
         self.vel_stimata_y = 0.0
         self.vel_stimata_valida = False
-        self.vel_drone_x = 0.0
-        self.vel_drone_y = 0.0
-        self.istante_vel_drone = None
 
-        # Compensazione d'assetto. La telecamera è solidale al corpo: una
-        # rotazione del velivolo trasla l'immagine indipendentemente da dove si
-        # trovi il bersaglio. Con FOV orizzontale 1.047 rad su 640x480, i
-        # semicampi valgono 0.524 rad in orizzontale e 0.408 in verticale, quindi
-        # un radiante di assetto vale 1/0.408 ≈ 2.45 unità normalizzate: bastano
-        # 10° di pitch per spostare il bersaglio di mezzo campo.
-        # Misurato senza compensazione: correlazione r = -0.665 fra pitch ed
-        # errore verticale, con l'errore che spazzava l'intero campo visivo
-        # mentre il bersaglio era pressoché fermo.
+        # Compensazione d'assetto: una rotazione del velivolo trasla l'immagine
+        # indipendentemente da dove sia il bersaglio, e bastano 10 gradi di
+        # pitch per spostarlo di mezzo campo.
 
-        # Guadagni PD espressi in 1/s: agiscono sullo scostamento del bersaglio
-        # in METRI, non sulle coordinate normalizzate dell'immagine. Quelle
-        # cambiano significato al variare di quota e campo visivo, quindi una
-        # taratura fatta su di esse va rifatta a ogni modifica dell'ottica.
-        #
-        # Dimensionati per un bersaglio a 8.3 m/s (30 km/h). L'errore a regime di
-        # un controllo proporzionale vale velocita/kp, e va confrontato con la
-        # semi-impronta a terra, che a 12 m di quota con FOV 90 gradi misura 12 m:
-        #   kp 1.2 -> 6.9 m (58% del semicampo, troppo vicino al bordo)
-        #   kp 2.0 -> 4.2 m (35%, margine sufficiente anche nei transitori)
-        # Nota: scendere sotto 1.2 e stato provato e peggiora molto (a 0.6 la
-        # distanza mediana dal bersaglio passava da 3.5 a 26.7 m): con guadagno
-        # basso il drone non tiene il passo.
-        # Alzati a 2.0 con lo scenario realistico. Il guadagno era tenuto
-        # basso perche piu aggressivita significava piu inclinazione e quindi
-        # meno campo utile; con la sospensione cardanica quel conflitto non
-        # esiste piu, ed e stato misurato: a 5.5 m/s di fuga, con telecamera
-        # fissa il guadagno 2.0 faceva scendere il rilevamento dal 73% al 53%,
-        # con la sospensione lo faceva salire dal 74% all'81%.
-        # L'errore a regime vale velocita/kp: a 15 m/s sono 7.5 m, entro i 50 m
-        # di semicampo disponibili alla quota operativa.
+        # Guadagni PD in 1/s, applicati allo scostamento in METRI: sulle
+        # coordinate normalizzate la taratura andrebbe rifatta a ogni cambio di
+        # quota o ottica. L'errore a regime vale velocita/kp, 7.5 m a 15 m/s.
         self.kp_x = parametro(self, 'kp_x', 2.0)      # 1/s
         self.kp_y = parametro(self, 'kp_y', 2.0)
         self.kd_x = parametro(self, 'kd_x', 0.35)
         self.kd_y = parametro(self, 'kd_y', 0.35)
-        # Deve superare la velocita del bersaglio, altrimenti il drone non puo
-        # recuperare terreno per costruzione. A 3.5 non pareggiava nemmeno gli
-        # 8.3 m/s del bersaglio. Il limite e per asse: il modulo diagonale
+        # Deve superare la velocita del bersaglio, o il drone non puo recuperare
+        # terreno per costruzione. Il limite e per asse: il modulo diagonale
         # arriva a vel_max*sqrt(2).
-        # Deve superare la velocita del bersaglio, altrimenti il drone non
-        # puo recuperare terreno per costruzione. Con il bersaglio a 15 m/s,
-        # venti danno il margine necessario a chiudere la distanza invece di
-        # limitarsi a non perderla.
         self.vel_max = parametro(self, 'vel_max', 20.0)
 
-        # Zona morta ampia, in metri. Con 0.3 m il drone correggeva anche errori
-        # minimi: con kp alto questo produce inclinazioni continue, e ogni grado
-        # di inclinazione trasla l'inquadratura di 1/semi_fov. Il risultato
-        # misurato era la perdita del bersaglio dopo 8 s pur essendo il bersaglio
-        # quasi fermo. A 1.5 m il drone ignora gli scarti piccoli e resta piatto
-        # quando il bersaglio e sotto di lui, conservando il guadagno alto per
-        # quando serve davvero, cioe durante una fuga.
-        # Zona morta pari a meta della lunghezza del veicolo: dentro quel
-        # raggio il drone e gia sopra il bersaglio, e correggere ancora
-        # produrrebbe solo inclinazioni inutili.
+        # Zona morta pari a meta della lunghezza del veicolo: dentro quel raggio
+        # il drone e gia sopra il bersaglio, e correggere ancora produrrebbe
+        # solo inclinazioni, che tolgono campo utile senza avvicinare nulla.
         self.deadzone = parametro(self, 'deadzone', 2.0)   # metri
         self.semi_fov_o = 0.7854     # rad, meta del FOV orizzontale (90°)
         self.semi_fov_v = 0.6435     # rad, meta del FOV verticale su 640x480
@@ -211,14 +137,10 @@ class ControllerNode(Node):
         self.primo_aggancio    = True
         self.cmd_corrente      = Twist()
 
-        # --- Watchdog sugli ingressi ---
-        # Ogni callback registra l'istante del proprio ultimo messaggio. Il
-        # timer di pubblicazione, prima di ripetere il comando, verifica che gli
-        # ingressi su cui quel comando e stato calcolato siano ancora vivi.
-        # Senza questa verifica la morte di detector_node, o un ponte immagini
-        # che si ferma, lasciava il drone a ripetere all'infinito l'ultima
-        # velocita nota: volo alla cieca fino a 5 m/s, senza che nulla nei log
-        # lo segnalasse.
+        # Watchdog: ogni callback registra l'istante del proprio ultimo
+        # messaggio, e il timer verifica che gli ingressi su cui il comando e
+        # stato calcolato siano ancora vivi. Senza, la morte del rilevatore
+        # lascerebbe il drone a ripetere all'infinito l'ultima velocita nota.
         self.istante_tracked = None
         self.istante_posa    = None
         self.istante_quota   = None
@@ -231,16 +153,10 @@ class ControllerNode(Node):
         self.timeout_posa_s  = parametro(self, 'timeout_posa_s', 1.0)
         self.timeout_quota_s = parametro(self, 'timeout_quota_s', 2.0)
 
-        # --- Coasting alla perdita di vista ---
-        # Azzerare il comando appena il tracker rinuncia lasciava il drone
-        # immobile per tutta l'attesa prima di RICERCA: ~1.4 s di inseguimento
-        # sulla predizione di Kalman, poi fermo fino allo scadere di
-        # soglia_avvia_ricerca_s in mission_node. Mantenere per qualche istante
-        # l'ultima velocita comandata, smorzandola a zero, prosegue il moto
-        # nella direzione in cui il bersaglio si stava muovendo, che e la piu
-        # probabile per riacquisirlo. E una versione povera del termine di
-        # anticipo previsto in Fase 5, che usera la velocita stimata dal filtro
-        # invece dell'ultimo comando.
+        # Coasting: alla perdita di vista il comando non si azzera di netto ma
+        # si smorza a zero, proseguendo nella direzione in cui il bersaglio si
+        # stava muovendo, che e la piu probabile per riacquisirlo. Azzerare
+        # subito lasciava il drone immobile per tutta l'attesa prima di RICERCA.
         self.istante_perdita_vista = None
         self.cmd_base_coasting     = (0.0, 0.0)
         self.durata_coasting_s     = parametro(self, 'durata_coasting_s', 2.0)
@@ -290,11 +206,9 @@ class ControllerNode(Node):
 
         scaduti = self._ingressi_scaduti()
         if scaduti:
-            # Fermarsi e l'unica opzione sicura: senza la posa il comando non si
-            # puo nemmeno ruotare nel frame del mondo (serve lo yaw), e senza
-            # percezione non c'e piu un bersaglio da inseguire. Si continua a
-            # pubblicare, azzerato: interrompere del tutto lo stream di setpoint
-            # farebbe uscire ArduPilot da GUIDED.
+            # Fermarsi e l'unica opzione sicura: senza posa il comando non si
+            # puo nemmeno ruotare nel frame del mondo. Si continua a pubblicare
+            # azzerato, perche interrompere i setpoint farebbe uscire da GUIDED.
             self.cmd_corrente = Twist()
             self.istante_perdita_vista = None
             self.primo_aggancio = True
@@ -307,11 +221,14 @@ class ControllerNode(Node):
         self.mavros_vel_pub.publish(self._comando_da_pubblicare())
 
     def _velocita_istantanea(self, quota):
-        """Velocita ASSOLUTA del bersaglio ricavata dall'ultimo fotogramma.
+        """Velocita del bersaglio in assi velivolo, da questo fotogramma.
 
-        Restituisce (avanti, laterale) oppure None se manca la stima del filtro
-        o la velocita del velivolo: senza una delle due la ricostruzione
-        sarebbe sbagliata, e una velocita sbagliata e peggio di nessuna.
+        Il filtro la stima gia come velocita PROPRIA del bersaglio, perche il
+        moto del velivolo vi entra come ingresso noto: qui resta solo da
+        convertirla da coordinate immagine a metri al secondo. Prima andava
+        sommata la velocita del velivolo, e quella somma fra due grandezze
+        grandi per ottenerne una piccola era l'origine dell'errore pari al
+        segnale.
 
         Da sola non va usata: un singolo fotogramma misura l'oscillazione del
         bersaglio nell'immagine piu che il suo moto. Alimenta la finestra da
@@ -319,31 +236,13 @@ class ControllerNode(Node):
         """
         if not self.vel_stimata_valida:
             return None
-        adesso = self.get_clock().now().nanoseconds / 1e9
-        if (self.istante_vel_drone is None
-                or adesso - self.istante_vel_drone > self.timeout_posa_s):
-            return None
 
-        # Da coordinate immagine al secondo a metri al secondo al suolo, con la
-        # stessa conversione usata per la posizione.
-        v_rel_x = self.vel_stimata_x * quota * self.tan_semi_fov_o
-        v_rel_y = self.vel_stimata_y * quota * self.tan_semi_fov_v
-
-        # Stessa mappatura fra assi immagine e assi velivolo usata per
-        # l'errore: un bersaglio che si sposta verso +x nell'immagine si
-        # allontana verso la sinistra del velivolo.
-        rel_avanti = -v_rel_y
-        rel_laterale = -v_rel_x
-
-        # La velocita del velivolo e nel frame del mondo: va riportata nel
-        # frame del velivolo per sommarla, poi il totale torna nel mondo nel
-        # punto in cui viene usata.
-        cos_y = math.cos(self.yaw)
-        sin_y = math.sin(self.yaw)
-        drone_avanti = self.vel_drone_x * cos_y + self.vel_drone_y * sin_y
-        drone_laterale = -self.vel_drone_x * sin_y + self.vel_drone_y * cos_y
-
-        return rel_avanti + drone_avanti, rel_laterale + drone_laterale
+        # Da coordinate immagine al secondo a metri al secondo al suolo, con
+        # la stessa conversione usata per la posizione. La mappatura fra assi
+        # immagine e assi velivolo e quella dell'errore: un bersaglio che si
+        # sposta verso +x nell'immagine va verso la sinistra del velivolo.
+        return (-self.vel_stimata_y * quota * self.tan_semi_fov_v,
+                -self.vel_stimata_x * quota * self.tan_semi_fov_o)
 
     def _aggiorna_finestra_velocita(self, quota):
         """Aggiunge la stima di questo fotogramma e scarta le troppo vecchie."""
@@ -503,11 +402,6 @@ class ControllerNode(Node):
         self.vel_stimata_y = msg.y
         self.vel_stimata_valida = (msg.z != 0.0)
 
-    def on_velocita_drone(self, msg: TwistStamped):
-        self.istante_vel_drone = self.get_clock().now().nanoseconds / 1e9
-        self.vel_drone_x = msg.twist.linear.x
-        self.vel_drone_y = msg.twist.linear.y
-
     def on_gimbal_roll(self, msg: Float64):
         self.gimbal_roll = msg.data
 
@@ -530,37 +424,25 @@ class ControllerNode(Node):
             self._avvia_coasting()
             return
 
-        # Guardia FOV. La stima cade fuori dal campo inquadrabile, quindi non e
-        # affidabile e non la si insegue. Prima si azzerava il comando di netto:
-        # ma questa e la situazione tipica di una fuga veloce, in cui il
-        # bersaglio scivola verso il bordo poco prima di sparire, e azzerare
-        # proprio lì svuotava il coasting del suo contenuto (la base sarebbe
-        # stata zero). Si tratta come una perdita di vista: non si dà retta alla
-        # stima sospetta, ma si prosegue smorzando l'ultimo comando buono.
+        # Guardia FOV: la stima cade fuori dal campo inquadrabile e non e
+        # affidabile. Si tratta come una perdita di vista invece di azzerare il
+        # comando — e la situazione tipica di una fuga veloce, e azzerare
+        # proprio li svuoterebbe il coasting del suo contenuto.
         if abs(msg.x) > 1.2 or abs(msg.y) > 1.2:
             self._avvia_coasting()
             return
 
         self.istante_perdita_vista = None
 
-        # Si sottrae la traslazione d'immagine dovuta all'assetto, così l'errore
-        # rappresenta la posizione del bersaglio e non l'inclinazione del drone.
-        #
-        # La sottrazione va fatta sugli ANGOLI, non sulle coordinate
-        # normalizzate: in una proiezione prospettica vale
-        # u = tan(alpha)/tan(semi_fov), quindi coordinata e angolo non sono
-        # proporzionali. Dividere l'assetto per il semicampo in radianti, come
-        # si faceva prima, sovracorregge: il denominatore corretto e
-        # tan(0.7854) = 1.0 e non 0.7854 in orizzontale (27% in meno di quanto
-        # veniva sottratto) e tan(0.6435) = 0.750 e non 0.6435 in verticale
-        # (16%). Si converte la misura in angolo, si toglie l'assetto, si torna
-        # in coordinate normalizzate.
-        # Assetto della TELECAMERA, non del corpo: quello che trasla
-        # l'inquadratura e l'inclinazione dell'asse ottico, che vale assetto
-        # del corpo piu angolo del giunto. Sottrarre l'assetto del corpo
-        # quando il gimbal lo ha gia annullato introduce un errore fantasma
-        # invece di rimuoverne uno: misurato come distanza mediana da 3.7 a
-        # 10.5 m e un ingresso in RICERCA che senza gimbal non avveniva.
+        # Si toglie la traslazione d'immagine dovuta all'assetto, cosi che
+        # l'errore dica dov'e il bersaglio e non quanto e inclinato il drone.
+        # Due avvertenze, entrambe costate una misura sbagliata:
+        #  - si sottrae sugli ANGOLI e non sulle coordinate normalizzate, che in
+        #    proiezione prospettica valgono tan(alpha)/tan(semi_fov) e quindi
+        #    non sono proporzionali all'angolo;
+        #  - conta l'assetto della TELECAMERA, corpo piu giunto: sottrarre
+        #    quello del corpo dove il gimbal lo ha gia annullato aggiunge un
+        #    errore invece di toglierlo.
         roll_camera = self.roll + self.gimbal_roll
         pitch_camera = self.pitch + self.gimbal_pitch
         alpha_x = math.atan(msg.x * self.tan_semi_fov_o) - roll_camera
@@ -609,28 +491,19 @@ class ControllerNode(Node):
             v_avanti = -(self.kp_y * error_y + self.kd_y * deriv_y)
             v_avanti = max(-self.vel_max, min(self.vel_max, v_avanti))
 
-        # Rotazione dal frame del drone a quello locale ENU.
-        # `/mavros/setpoint_velocity/cmd_vel_unstamped` viene tradotto da MAVROS
-        # in SET_POSITION_TARGET_LOCAL_NED con frame LOCAL_NED, cioè il frame del
-        # MONDO: pubblicare lì un vettore calcolato nel frame della telecamera è
-        # corretto solo se lo yaw è zero. In volo lo yaw non è controllato e
-        # deriva: misurato 25° di media con ±21° di oscillazione, che portava il
-        # comando a puntare in media 61° fuori bersaglio — il drone spingeva di
-        # traverso e non riusciva a seguire nemmeno un'orbita lenta.
+        # Rotazione dal frame del drone a quello locale ENU. MAVROS traduce
+        # questo topic in SET_POSITION_TARGET_LOCAL_NED, che e nel frame del
+        # MONDO: pubblicarvi un vettore calcolato nel frame della telecamera
+        # sarebbe corretto solo a yaw nullo, e in volo lo yaw non e controllato.
         cos_y = math.cos(self.yaw)
         sin_y = math.sin(self.yaw)
         cmd.linear.x = v_avanti * cos_y - v_laterale * sin_y
         cmd.linear.y = v_avanti * sin_y + v_laterale * cos_y
 
-        # --- Termine di anticipo ---
-        # Il controllo proporzionale corregge lo scarto attuale; questo termine
-        # aggiunge la velocita necessaria a non accumularne di nuovo. La stima
-        # del filtro e relativa al drone, quindi si somma la velocita del
-        # velivolo per ottenere quella assoluta del bersaglio.
-        # Prima la finestra, poi chi la legge: l'ordine conta, altrimenti
-        # la stima pubblicata sarebbe vecchia di un fotogramma rispetto a
-        # quella usata per il comando, e due grandezze che devono coincidere
-        # non coinciderebbero.
+        # Prima si aggiorna la finestra, poi la leggono entrambi: altrimenti la
+        # stima pubblicata sarebbe vecchia di un fotogramma rispetto a quella
+        # usata per il comando, e due grandezze che devono coincidere non
+        # coinciderebbero.
         self._aggiorna_finestra_velocita(quota)
         self._pubblica_stima_mondo(error_x, error_y, quota, cos_y, sin_y)
 
@@ -647,9 +520,6 @@ class ControllerNode(Node):
         self.cmd_pub.publish(cmd)
 
         mode = 'GPS+VISIONE' if not self.gps_jammed else 'SOLO VISIONE'
-        # self.get_logger().info(
-        #     f'[{mode}] err:({error_x:.2f},{error_y:.2f}) '
-        #     f'→ v:({cmd.linear.y:.2f},{cmd.linear.x:.2f})')
 
     def on_altitudine(self, msg):
         self.istante_quota = self.get_clock().now().nanoseconds / 1e9

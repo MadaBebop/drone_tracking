@@ -67,12 +67,8 @@ class MissionNode(Node):
         # Publisher: per resettare lo stato missione
         self.reset_pub = self.create_publisher(Bool, '/tracker/reset', 10)
         
-        # Circuito di pattugliamento, scalato allo scenario realistico: 150 m
-        # di lato invece di 20, a 50 m di quota invece di 12. A 20 m/s il
-        # vecchio circuito si percorreva per intero in poco piu di un secondo,
-        # e la quota di 12 m dava un'impronta a terra di 24 m, che un veicolo
-        # a 15 m/s attraversa in un secondo e mezzo. A 50 m l'impronta e di
-        # 100 m e il margine diventa di quasi sette secondi.
+        # Circuito da 150 m a 50 m di quota: l'impronta a terra vale 100 m, che
+        # un veicolo a 15 m/s attraversa in quasi sette secondi.
         self.waypoints = [
             (  0.0,   0.0, 50.0),   # origine - partenza
             (150.0,   0.0, 50.0),   # nord
@@ -85,11 +81,9 @@ class MissionNode(Node):
         self.posizione_attuale = None
         self.bersaglio_agganciato = False
 
-        # Istante dell'ultimo messaggio ricevuto da ciascuna sorgente. Servono
-        # per distinguere "il bersaglio non e visibile" da "nessuno mi sta piu
-        # dicendo se il bersaglio e visibile": il primo caso era gestito, il
-        # secondo no, e la differenza pratica e che nel secondo la missione
-        # restava congelata in AGGANCIO a tempo indeterminato.
+        # Distinguono «il bersaglio non e visibile» da «nessuno mi sta piu
+        # dicendo se e visibile»: senza, il silenzio di una sorgente congelava
+        # la missione in AGGANCIO a tempo indeterminato.
         self.istante_ultimo_target = None
         self.istante_ultima_posa   = None
         # Ultima stima nota del bersaglio nel mondo: (x, y, vx, vy, istante).
@@ -100,11 +94,9 @@ class MissionNode(Node):
         self.timeout_telemetria_s = parametro(
             self, 'timeout_telemetria_s', 1.0)   # MAVROS pubblica a 10-50 Hz
         
-        # Tolleranza sul waypoint, in metri. Deve valere qualche decimo di
-        # secondo di volo, altrimenti il drone deve arrivare quasi fermo per
-        # centrare il punto e a velocita di crociera lo sorpassa, oscillando.
-        # A 20 m/s tre metri sarebbero 0.15 s: quindici metri su una tratta di
-        # 150 non cambiano il percorso e permettono di non frenare.
+        # Tolleranza sul waypoint: deve valere qualche decimo di secondo di
+        # volo, altrimenti il drone dovrebbe arrivarci quasi fermo. Quindici
+        # metri su una tratta di 150 non cambiano il percorso.
         self.soglia_waypoint = parametro(self, 'soglia_waypoint', 15.0)
         
         self.rilevamento_attivo = False
@@ -112,18 +104,15 @@ class MissionNode(Node):
 
         self.frame_conferma_richiesti = parametro(
             self, 'frame_conferma_richiesti', 5)
-        # In RICERCA il bersaglio attraversa il campo visivo di sfuggita: cinque
-        # frame consecutivi (~0.45 s) sono spesso piu di quanto duri il
-        # passaggio, e il riaggancio non scattava mai. Per riagganciare bastano
-        # meno conferme: il rischio di un falso positivo e accettabile, visto che
-        # l'alternativa e continuare a cercare a vuoto.
+        # In RICERCA il bersaglio attraversa il campo di sfuggita, spesso per
+        # meno di quanto durino cinque fotogrammi: per riagganciare bastano meno
+        # conferme, e il rischio di un falso positivo e preferibile al cercare
+        # a vuoto.
         self.frame_conferma_riaggancio = parametro(
             self, 'frame_conferma_riaggancio', 2)
-        # Rilevamenti consecutivi, contati sul flusso del rilevatore e non su
-        # quello del filtro. Sono due grandezze diverse e vanno tenute
-        # separate: il filtro resta valido per `soglia_perdita` fotogrammi
-        # dopo l'ultima misura, quindi un solo avvistamento ne produce
-        # abbastanza da soddisfare qualunque soglia di conferma.
+        # Contati sul flusso del RILEVATORE e non del filtro: quello resta
+        # valido per `soglia_perdita` fotogrammi dopo l'ultima misura, quindi un
+        # solo avvistamento soddisferebbe qualunque soglia di conferma.
         self.rilevamenti_consecutivi = 0
         
         self.timer = self.create_timer(0.5, self.aggiorna_missione)
@@ -147,11 +136,8 @@ class MissionNode(Node):
         # possibilita del velivolo.
         self.ricerca_vel_angolare = parametro(
             self, 'ricerca_vel_angolare', 0.25)   # rad/s
-        # Un giro dura 2*pi/0.25 = 25 s: con 3 m/s di espansione i bracci
-        # distano 75 m, meno dei 100 inquadrati a 50 m di quota, quindi la
-        # spirale non lascia zone scoperte. Con il valore precedente, 0.4 m/s,
-        # i bracci disterebbero 10 m e la ricerca sarebbe dieci volte piu lenta
-        # del necessario.
+        # Un giro dura 2*pi/0.25 = 25 s: a 3 m/s di espansione i bracci distano
+        # 75 m, meno dei 100 inquadrati, quindi non restano zone scoperte.
         self.ricerca_vel_espansione = parametro(
             self, 'ricerca_vel_espansione', 3.0)   # m/s
         # Un bersaglio a 15 m/s percorre 300 m nei venti secondi di fuga: il
@@ -161,49 +147,28 @@ class MissionNode(Node):
         self.ricerca_raggio_max = parametro(
             self, 'ricerca_raggio_max', 300.0)     # m, poi si rinuncia
         self.ricerca_ultimo_istante = None
-        # Prima di aprire la spirale si potrebbe volare dove il bersaglio
-        # sarebbe se avesse proseguito, estrapolando dalla sua velocita
-        # stimata. Il default e zero, cioe spento, e il motivo e misurato:
-        # su 18 prove e 5426 campioni l'errore mediano di quella stima vale
-        # 10.8 m/s contro un bersaglio che viaggia a 10.0. L'errore e grande
-        # quanto il segnale, e da una grandezza cosi non si ricava una
-        # direzione: in una prova il drone ha volato 80 secondi nel verso
-        # opposto alla fuga. I presidi sul valore (mediana, limite fisico,
-        # memoria) impediscono il disastro ma non creano informazione.
+        # Primo tempo della ricerca: volare dove il bersaglio sarebbe se avesse
+        # proseguito, estrapolando dalla velocita stimata. Spento per default
+        # perche quella stima aveva errore pari al segnale (README, «Ricerca del
+        # bersaglio»), e da una grandezza cosi non si ricava una direzione. Il
+        # difetto era a monte ed e stato corretto — il filtro ora riceve il moto
+        # del velivolo come ingresso noto — quindi il valore va riprovato: 8.0 s
+        # e il punto di partenza ragionevole, oltre i quali l'estrapolazione
+        # rettilinea decade perche un veicolo in fuga curva.
         #
-        # Il termine resta parametrico perche il difetto e a monte e ha una
-        # soluzione nota: dare al filtro la velocita del velivolo come ingresso
-        # noto, cosi che stimi la velocita assoluta del bersaglio invece di
-        # ricavarla per differenza da un'immagine dove i due moti sono
-        # sovrapposti. Migliorata la stima, questo torna acceso senza altre
-        # modifiche. Un valore ragionevole e 8.0 s: a 15 m/s sono 120 m, oltre
-        # i quali l'estrapolazione rettilinea decade comunque perche un veicolo
-        # in fuga curva.
-        #
-        # Cio che invece resta ACCESO e l'altra meta della modifica: il centro
-        # della ricerca sull'ultima posizione nota del bersaglio anziche del
-        # drone. Quella non dipende dalla velocita, e la posizione e stimata
-        # bene.
+        # L'altra meta della modifica resta ACCESA: il centro della ricerca
+        # sull'ultima posizione nota del bersaglio, che non dipende dalla
+        # velocita.
         self.durata_inseguimento_cieco_s = parametro(
             self, 'durata_inseguimento_cieco_s', 0.0)
         self.istante_inizio_ricerca = None
-        # Attesa prima di dichiarare perso il bersaglio, in SECONDI. Era un
-        # conteggio di frame tarato su 10 Hz, ma /target/tracked_position segue
-        # il ritmo della telecamera (5-13 Hz): la stessa soglia valeva fra 1.5 e
-        # 4 secondi a seconda del carico della macchina.
-        self.istante_perdita     = None
-        # Portata a 6 s nell'idea che il controller continuasse a inseguire per
-        # tutta l'attesa. Misurando la sequenza reale si e visto che non e cosi:
-        # il tracker estrapola per 15 fotogrammi (~1.4 s), poi si azzera, e da
-        # quel momento controller_node azzerava il comando. Il drone passava
-        # quindi ~1.4 s a inseguire e i restanti ~4.6 s immobile, prima di
-        # cominciare a cercare davvero.
-        # Ora l'attesa e coperta in modo attivo: controller_node prosegue con
-        # una rampa di coasting (durata_coasting_s, 2 s) nella direzione in cui
-        # il bersaglio si stava muovendo. Restare fermi oltre non aggiunge
-        # probabilita di riacquisizione, mentre la spirale di RICERCA almeno si
-        # muove: 3 s coprono la predizione piu il coasting e lasciano circa
-        # mezzo secondo di margine.
+        self.istante_perdita = None
+        # Attesa prima di dichiarare perso il bersaglio, in SECONDI e non in
+        # fotogrammi: il ritmo della telecamera varia col carico, e una soglia
+        # contata in fotogrammi valeva fra 1.5 e 4 secondi. Tre secondi coprono
+        # la predizione del filtro piu la rampa di coasting del controllo;
+        # restare fermi oltre non aggiunge probabilita di riacquisizione,
+        # mentre la spirale almeno si muove.
         self.soglia_avvia_ricerca_s = parametro(
             self, 'soglia_avvia_ricerca_s', 3.0)
 

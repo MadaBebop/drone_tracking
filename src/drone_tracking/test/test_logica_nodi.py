@@ -135,9 +135,6 @@ def test_anticipo_pareggia_la_velocita_del_bersaglio():
     nodo = controller_con_anticipo()
     try:
         quota = 12.0
-        nodo.istante_vel_drone = ora(nodo)
-        nodo.vel_drone_x = 0.0
-        nodo.vel_drone_y = 0.0
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_x = 0.0
         nodo.vel_stimata_y = 0.1          # unita normalizzate al secondo
@@ -145,33 +142,6 @@ def test_anticipo_pareggia_la_velocita_del_bersaglio():
         avanti, laterale = nodo._anticipo()
         atteso = -0.1 * quota * nodo.tan_semi_fov_v
         assert abs(avanti - atteso) < 1e-9
-        assert abs(laterale) < 1e-9
-    finally:
-        nodo.destroy_node()
-
-
-def test_anticipo_nullo_se_il_bersaglio_e_fermo():
-    """La stima del filtro e relativa: da sola direbbe che il bersaglio si
-    muove ogni volta che si muove il drone.
-
-    Qui il drone avanza a 2 m/s verso un bersaglio immobile. La velocita
-    relativa vale quindi -2 m/s, e sommata a quella del velivolo deve dare
-    zero: un anticipo diverso da zero significherebbe inseguire il proprio
-    moto.
-    """
-    nodo = controller_con_anticipo()
-    try:
-        quota = 12.0
-        nodo.yaw = 0.0                    # frame velivolo e mondo coincidono
-        nodo.istante_vel_drone = ora(nodo)
-        nodo.vel_drone_x = 2.0
-        nodo.vel_drone_y = 0.0
-        nodo.vel_stimata_valida = True
-        nodo.vel_stimata_x = 0.0
-        nodo.vel_stimata_y = 2.0 / (quota * nodo.tan_semi_fov_v)
-        riempi_finestra(nodo, quota)
-        avanti, laterale = nodo._anticipo()
-        assert abs(avanti) < 1e-9, 'anticipo %.4f: sta inseguendo se stesso' % avanti
         assert abs(laterale) < 1e-9
     finally:
         nodo.destroy_node()
@@ -185,19 +155,10 @@ def test_anticipo_si_disattiva_senza_i_dati_necessari():
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_y = 0.1
 
-        # Velocita del velivolo mai ricevuta: la ricostruzione sarebbe errata,
-        # e nessun campione deve entrare nella finestra.
-        nodo.istante_vel_drone = None
-        riempi_finestra(nodo, 12.0)
-        assert nodo._anticipo() == (0.0, 0.0)
-
-        # Ricevuta, ma vecchia.
-        nodo.istante_vel_drone = ora(nodo) - 10.0
-        riempi_finestra(nodo, 12.0)
-        assert nodo._anticipo() == (0.0, 0.0)
-
-        # Stima del filtro non valida.
-        nodo.istante_vel_drone = ora(nodo)
+        # Stima del filtro non valida. E la sola condizione rimasta al
+        # controllo: la validita dell'ingresso noto la verifica il tracker, che
+        # semplicemente non pubblica una velocita che non sia quella propria
+        # del bersaglio.
         nodo.vel_stimata_valida = False
         riempi_finestra(nodo, 12.0)
         assert nodo._anticipo() == (0.0, 0.0)
@@ -228,11 +189,12 @@ def test_la_velocita_predetta_non_e_valida():
     La POSIZIONE predetta resta invece valida: e cio che tollera le
     micro-interruzioni dell'inseguimento.
     """
-    nodo = TrackerNode()
+    nodo = tracker_con_velivolo()
     pubblicate = []
     nodo._pubblica_velocita = lambda valida: pubblicate.append(valida)
     try:
         nodo.on_detection(Point(x=0.1, y=0.1, z=100.0))   # acquisizione
+        nodo.istante_vel_drone = ora(nodo)
         nodo.on_detection(Point(x=0.2, y=0.1, z=100.0))   # misura
         assert pubblicate[-1] is True, 'una misura deve valere una velocita'
 
@@ -256,9 +218,6 @@ def test_velocita_impossibile_viene_rifiutata():
     nodo = controller_in_aggancio()
     try:
         quota = 50.0
-        nodo.istante_vel_drone = ora(nodo)
-        nodo.vel_drone_x = 0.0
-        nodo.vel_drone_y = 0.0
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_x = 0.0
         # 2.0 unita normalizzate al secondo a 50 m di quota sono 75 m/s.
@@ -290,9 +249,6 @@ def test_la_velocita_stabilita_sopravvive_alla_fine_delle_misure():
     nodo = controller_in_aggancio()
     try:
         quota = 50.0
-        nodo.istante_vel_drone = ora(nodo)
-        nodo.vel_drone_x = 0.0
-        nodo.vel_drone_y = 0.0
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_x = 0.0
         nodo.vel_stimata_y = 0.2
@@ -321,9 +277,6 @@ def test_una_stima_impossibile_non_sostituisce_una_buona():
     nodo = controller_in_aggancio()
     try:
         quota = 50.0
-        nodo.istante_vel_drone = ora(nodo)
-        nodo.vel_drone_x = 0.0
-        nodo.vel_drone_y = 0.0
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_x = 0.0
         nodo.vel_stimata_y = 0.2                  # 7.5 m/s, plausibile
@@ -350,9 +303,6 @@ def test_la_mediana_scarta_le_inversioni_di_direzione():
     nodo = controller_in_aggancio()
     try:
         quota = 50.0
-        nodo.istante_vel_drone = ora(nodo)
-        nodo.vel_drone_x = 0.0
-        nodo.vel_drone_y = 0.0
         nodo.vel_stimata_valida = True
         nodo.vel_stimata_x = 0.0
 
@@ -450,6 +400,171 @@ def test_parametro_si_aggiorna_a_caldo():
         assert abs(nodo.kp_x - 3.3) < 1e-9
         nodo.set_parameters([Parameter('vel_max', Parameter.Type.DOUBLE, 7.5)])
         assert abs(nodo.vel_max - 7.5) < 1e-9
+    finally:
+        nodo.destroy_node()
+
+
+def tracker_con_velivolo(avanti=0.0, laterale=0.0, quota=50.0):
+    """Tracker che conosce il moto del velivolo, quindi applica l'ingresso noto.
+
+    Senza questi valori il filtro non puo sapere quanta parte dello spostamento
+    d'immagine sia sua, e allora non applica l'ingresso e non pubblica la
+    velocita: e il comportamento prudente, non un caso da aggirare nelle prove.
+    """
+    nodo = TrackerNode()
+    nodo.yaw = 0.0
+    nodo.vel_drone = (avanti, laterale)
+    nodo.istante_vel_drone = ora(nodo)
+    nodo.quota = quota
+    return nodo
+
+
+def test_ingresso_noto_scarta_il_moto_del_velivolo():
+    """Bersaglio fermo, velivolo che avanza: la velocita stimata resta nulla.
+
+    E la proprieta che distingue questo filtro da quello di prima. Un bersaglio
+    immobile scivola comunque nell'immagine mentre il velivolo trasla, e senza
+    ingresso noto il filtro attribuisce quello scorrimento al bersaglio. Qui il
+    velivolo fa 10 m/s in avanti a 50 m di quota: il bersaglio arretra
+    nell'immagine di 10*dt/(quota*TAN_V) a ogni campione, e il filtro deve
+    riconoscere che il movimento e suo.
+    """
+    dt, avanti = 0.1, 10.0
+    passo = avanti * dt / (50.0 * 0.750)
+
+    nodo = tracker_con_velivolo(avanti=avanti)
+    try:
+        for i in range(15):
+            nodo.ultimo_istante = ora(nodo) - dt
+            nodo.istante_vel_drone = ora(nodo)
+            nodo.on_detection(Point(x=0.0, y=passo * i, z=300.0))
+        vy = float(nodo.stato_stimato[3].item())
+        assert abs(vy) < 0.05, (
+            'il filtro attribuisce al bersaglio il moto del velivolo: %.3f' % vy)
+    finally:
+        nodo.destroy_node()
+
+    # Controprova: senza conoscere il moto del velivolo, la stessa sequenza
+    # produce una velocita pari allo scorrimento, cioe la diagnosi sbagliata.
+    cieco = TrackerNode()
+    try:
+        for i in range(15):
+            cieco.ultimo_istante = ora(cieco) - dt
+            cieco.on_detection(Point(x=0.0, y=passo * i, z=300.0))
+        vy = float(cieco.stato_stimato[3].item())
+        assert vy > 0.1, 'controprova non significativa: %.3f' % vy
+    finally:
+        cieco.destroy_node()
+
+
+def test_senza_moto_del_velivolo_la_velocita_non_si_pubblica():
+    """Senza ingresso noto la velocita di stato torna relativa.
+
+    E una grandezza diversa da quella promessa, e chi la legge non ha modo di
+    accorgersene: meglio tacere che cambiare significato di nascosto.
+    """
+    nodo = TrackerNode()
+    pubblicate = []
+    nodo._pubblica_velocita = lambda valida: pubblicate.append(valida)
+    try:
+        nodo.on_detection(Point(x=0.1, y=0.1, z=100.0))
+        nodo.ultimo_istante = ora(nodo) - 0.1
+        nodo.on_detection(Point(x=0.12, y=0.1, z=100.0))
+        assert pubblicate[-1] is False
+    finally:
+        nodo.destroy_node()
+
+
+def test_misura_implausibile_viene_rifiutata():
+    """Un valore anomalo va scartato, non pesato.
+
+    Il disturbo non e gaussiano — il 30% dei messaggi e una perdita totale e il
+    resto porta rumore con deviazione 0.3, quindici metri al suolo — e un
+    filtro gaussiano senza rifiuto non ha modo di distinguere una misura
+    sorprendente da una informativa: la media semplicemente.
+    """
+    nodo = tracker_con_velivolo()
+    nis = []
+    nodo.pub_nis = Raccoglitore()
+    try:
+        for i in range(20):
+            nodo.ultimo_istante = ora(nodo) - 0.1
+            nodo.istante_vel_drone = ora(nodo)
+            nodo.on_detection(Point(x=0.0, y=0.0, z=300.0))
+        prima = float(nodo.stato_stimato[0].item())
+
+        nodo.ultimo_istante = ora(nodo) - 0.1
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))   # salto impossibile
+        dopo = float(nodo.stato_stimato[0].item())
+
+        assert nodo.rifiuti_consecutivi == 1, 'la misura non e stata rifiutata'
+        assert abs(dopo - prima) < 0.05, (
+            'lo stato ha seguito il valore anomalo: %.3f -> %.3f' % (prima, dopo))
+        nis = [m.data for m in nodo.pub_nis.messaggi]
+        assert nis[-1] > nodo.soglia_gating, (
+            'il NIS non segnala la sorpresa: %.2f' % nis[-1])
+    finally:
+        nodo.destroy_node()
+
+
+def test_il_gating_scarta_un_valore_isolato_ma_segue_un_trasferimento():
+    """Rifiutare una volta, poi seguire: e la differenza fra i due casi.
+
+    Un valore anomalo isolato va scartato; un bersaglio che si e davvero
+    spostato va inseguito. Il filtro distingue i due casi senza saperne nulla:
+    rifiutando non corregge, quindi la covarianza cresce, e alla misura
+    successiva il varco si e allargato abbastanza da lasciarla passare se
+    insiste. Misurato: NIS 10.4 al primo salto, 8.7 al secondo con la soglia a
+    9.21.
+    """
+    nodo = tracker_con_velivolo()
+    try:
+        for i in range(20):
+            nodo.ultimo_istante = ora(nodo) - 0.1
+            nodo.istante_vel_drone = ora(nodo)
+            nodo.on_detection(Point(x=0.0, y=0.0, z=300.0))
+
+        nodo.ultimo_istante = ora(nodo) - 0.1
+        nodo.istante_vel_drone = ora(nodo)
+        nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))
+        assert nodo.rifiuti_consecutivi == 1, 'il primo salto non e stato scartato'
+        assert abs(float(nodo.stato_stimato[0].item())) < 0.05, (
+            'lo stato ha seguito un valore isolato')
+
+        for i in range(6):
+            nodo.ultimo_istante = ora(nodo) - 0.1
+            nodo.istante_vel_drone = ora(nodo)
+            nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))
+        assert abs(float(nodo.stato_stimato[0].item()) - 0.9) < 0.15, (
+            'il filtro non ha seguito un trasferimento che insiste: %.3f'
+            % nodo.stato_stimato[0].item())
+    finally:
+        nodo.destroy_node()
+
+
+def test_dopo_troppi_rifiuti_il_filtro_riacquisisce():
+    """Rifiutare per sempre e il modo silenzioso di divergere.
+
+    La crescita della covarianza di solito riapre il varco da sola, quindi
+    questo paracadute non si vede quasi mai: per verificarlo si stringe la
+    soglia al punto che nessuna crescita possa riaprirla. Senza, un filtro che
+    scarta ogni misura resterebbe convinto di sapere dove sia il bersaglio, e
+    nessuno se ne accorgerebbe.
+    """
+    nodo = tracker_con_velivolo()
+    try:
+        nodo.on_detection(Point(x=0.0, y=0.0, z=300.0))   # acquisizione
+        nodo.soglia_gating = 1e-9                         # varco impossibile
+
+        for i in range(nodo.max_rifiuti + 1):
+            nodo.ultimo_istante = ora(nodo) - 0.1
+            nodo.istante_vel_drone = ora(nodo)
+            nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))
+
+        assert abs(float(nodo.stato_stimato[0].item()) - 0.9) < 1e-6, (
+            'il filtro non e ripartito dalla misura')
+        assert nodo.rifiuti_consecutivi == 0
     finally:
         nodo.destroy_node()
 

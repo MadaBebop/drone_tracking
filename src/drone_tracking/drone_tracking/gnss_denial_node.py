@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
 """Attacco al GNSS del velivolo, iniettato nel simulatore.
 
-Nodo distinto da jammer_node, perche i due guasti sono fisicamente diversi:
-jammer_node disturba il canale con cui il bersaglio viene rilevato, questo
-attacca il ricevitore satellitare del drone. Confonderli era il difetto
-principale della prima versione del progetto, in cui il topic /gps/jammed
-veniva pubblicato ma non guidava nulla.
+Nodo distinto da jammer_node perche i due guasti sono fisicamente diversi:
+quello disturba il canale con cui il bersaglio viene rilevato, questo attacca il
+ricevitore satellitare del drone.
 
-Il disturbo non viene simulato a livello di topic ROS: viene iniettato nei
-parametri del SITL, cosi ad essere messo alla prova e il sistema reale
-(autopilota compreso) e non una sua imitazione. Modi disponibili:
+Il disturbo e iniettato nei parametri del SITL e non simulato a livello di topic
+ROS, cosi a essere messo alla prova e il sistema reale, autopilota compreso.
+Modi disponibili:
 
-  jamming     SIM_GPS1_JAM = 1. Il ricevitore perde e riacquisisce il fix in
-              modo intermittente, con l'accuratezza dichiarata che degrada:
-              misurato fix_type da 6 a 1, satelliti da 10 a 3, accuratezza
-              orizzontale fino a 191 m.
-  negazione   SIM_GPS1_ENABLE = 0. Il ricevitore tace del tutto: e il caso
-              piu severo, equivalente a un'antenna staccata.
-  spoofing    SIM_GPS1_GLTCH_X/Y. Il fix viene falsificato di un offset in
-              gradi. Verificato sul topic del fix grezzo: la posizione
-              riportata si sposta davvero.
+  jamming     SIM_GPS1_JAM = 1, fix intermittente e accuratezza degradata
+  negazione   SIM_GPS1_ENABLE = 0, ricevitore muto: il caso piu severo
+  spoofing    SIM_GPS1_GLTCH_X/Y, fix falsificato di un offset in gradi
 
 Cosa aspettarsi, misurato prima di scrivere questo nodo. Nessuno dei tre modi
 degrada in modo osservabile la stima di posizione dell'autopilota entro il

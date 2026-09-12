@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
 """Stabilizzazione della telecamera: comanda i due giunti della sospensione.
 
-Il problema che risolve e geometrico, non di taratura. La telecamera era
-solidale al corpo, e un multirotore accelera inclinandosi: ogni comando di
-inseguimento produceva quindi una rotazione che traslava l'inquadratura
-indipendentemente da dove fosse il bersaglio. Piu il controllo era pronto, piu
-il velivolo si inclinava, e prima il bersaglio uscira dal campo — le due
-grandezze non si possono ottimizzare separatamente.
+Il problema e geometrico, non di taratura. Un multirotore accelera
+inclinandosi, e con la telecamera solidale al corpo ogni comando di
+inseguimento traslava l'inquadratura: piu il controllo era pronto, prima il
+bersaglio usciva dal campo, e le due cose non si potevano ottimizzare
+separatamente.
 
-La compensazione analitica in controller_node sottrae quella traslazione
-dall'errore, e resta al suo posto: corregge il controllo, ma non
-l'osservazione. Se l'inclinazione porta il bersaglio fuori dai pixel, nessun
-calcolo lo recupera. Questo nodo agisce invece sulla causa, tenendo l'asse
-ottico fermo rispetto al terreno mentre il corpo ruota.
+La compensazione analitica in controller_node corregge il controllo ma non
+l'osservazione — se l'inclinazione porta il bersaglio fuori dai pixel, nessun
+calcolo lo recupera. Questo nodo agisce sulla causa, tenendo l'asse ottico
+fermo rispetto al terreno.
 
-Il comando e l'opposto dell'assetto misurato, saturato ai limiti del giunto,
-che valgono 60 gradi. La corsa deve superare l'inclinazione massima del corpo
-con margine: quando era di 45 gradi contro i 40 consentiti al velivolo, il
-gimbal arrivava a fondo corsa proprio nelle manovre piu aggressive e smetteva
-di stabilizzare quando piu serviva. Oltre la saturazione il residuo torna a
-carico della compensazione analitica in controller_node, che continua a
-esistere proprio per questo.
+Il comando e l'opposto dell'assetto misurato, saturato alla corsa del giunto,
+che deve superare con margine l'inclinazione massima del velivolo. Oltre la
+saturazione il residuo torna a carico della compensazione analitica.
 """
 import math
 

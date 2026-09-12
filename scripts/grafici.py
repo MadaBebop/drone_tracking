@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
-"""Figure del filtro di Kalman, rigenerabili da un CSV di metrics_node.
+"""Figure per la relazione, rigenerabili da un CSV di metrics_node.
 
     grafici.py /ws/metrics/<prova>.csv [cartella_uscita]
-
-Produce due immagini:
 
     kalman_stima.png       stato stimato e matrice R nel tempo
     kalman_errore.png      errore di posizione con e senza filtro
     ricerca_evasione.png   percorsi di velivolo e bersaglio, in pianta
 
-Esistono come script e non come sessione interattiva per la stessa ragione per
-cui esiste metriche.py: una figura che finisce in una relazione deve poter
-essere rifatta da chiunque, dallo stesso dato, ottenendo la stessa immagine.
+Uno script e non una sessione interattiva, per la stessa ragione di
+metriche.py: una figura che finisce in una relazione deve poter essere rifatta
+da chiunque, dallo stesso dato, ottenendo la stessa immagine.
 
-Il termine di paragone del secondo grafico e la misura DISTURBATA, non il
-rilevamento pulito. E una scelta di sostanza: l'alternativa al filtro non e il
-segnale pulito, che nessuno possiede, ma quello che arriva davvero dal
-rilevatore dopo il disturbo. Confrontare l'uscita del filtro con il segnale
-pulito misurerebbe l'errore residuo, non il guadagno.
+Il termine di paragone del secondo grafico e la misura DISTURBATA e non il
+rilevamento pulito: l'alternativa al filtro non e il segnale pulito, che nessuno
+possiede, ma quello che arriva davvero dopo il disturbo.
 """
 import csv
 import math
@@ -188,16 +184,11 @@ def ombreggia(ax, finestre, etichetta=False):
 def figura_stima(righe, uscita):
     """Stato stimato e matrice R.
 
-    Pannello superiore: la coordinata x del bersaglio nell'immagine, nelle
-    unita in cui lavora il filtro. Tre grandezze: cio che il filtro riceve
-    (misura disturbata), cio che produce (stima) e cio che sarebbe vero
-    (rilevamento pulito, che il filtro non vede mai).
-
-    Pannello inferiore: l'elemento diagonale di R nel tempo. R non e costante:
-    cresce con il rumore dichiarato sul datalink, ed e il meccanismo con cui il
-    filtro si fida meno della misura quando la misura vale meno. I due
-    pannelli condividono l'asse dei tempi perche e quello il punto — la stima
-    si irrigidisce nelle stesse finestre in cui R sale.
+    Sopra, la coordinata x del bersaglio nell'immagine: cio che il filtro riceve,
+    cio che produce, e cio che sarebbe vero. Sotto, l'elemento diagonale di R,
+    che cresce con il rumore dichiarato sul datalink. I due pannelli condividono
+    l'asse dei tempi perche e quello il punto: la stima si irrigidisce nelle
+    stesse finestre in cui R sale.
     """
     t_mis, x_mis = [], []
     t_stima, x_stima = [], []
@@ -404,19 +395,15 @@ def _statistiche(coppie):
 def figura_errore(righe, uscita):
     """Errore di posizione con e senza filtro.
 
-    Entrambe le curve sono la distanza, in metri al suolo, fra il bersaglio
-    vero e dove lo si crede. Cambia solo da dove viene la coordinata immagine:
-    dalla misura disturbata che il rilevatore consegna, oppure dalla stima del
-    filtro. Quota, assetto, imbardata e posa del velivolo sono i valori veri per
-    entrambe, quindi la differenza fra le due e il filtro e nient'altro.
+    Entrambe le curve sono la distanza al suolo fra il bersaglio vero e dove lo
+    si crede; cambia solo da dove viene la coordinata immagine, perche quota,
+    assetto e posa sono i valori veri per entrambe.
 
-    Il confronto e APPAIATO — solo istanti in cui esistono entrambe — e
-    CONDIZIONATO al disturbo. Appaiato perche il filtro produce una posizione
-    anche quando misura non ce n'e, e quegli istanti sono i piu difficili:
-    metterli in una mediana confrontata con l'alternativa la penalizzerebbe per
-    aver risposto dove l'altra taceva. Condizionato perche fuori dalle finestre
-    di disturbo il jammer lascia passare la misura intatta, e li il filtro puo
-    solo aggiungere ritardo: una mediana unica sarebbe la media di due risposte
+    Il confronto e APPAIATO e CONDIZIONATO al disturbo. Appaiato perche il
+    filtro risponde anche dove misura non ce n'e, e contarlo lo penalizzerebbe
+    per aver risposto dove l'altro taceva. Condizionato perche fuori dalle
+    finestre il jammer lascia passare la misura intatta, e li il filtro puo solo
+    aggiungere ritardo: una mediana unica sarebbe la media di due risposte
     opposte.
     """
     t_senza, e_senza = [], []

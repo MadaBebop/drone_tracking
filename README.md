@@ -445,10 +445,113 @@ Filtro di Kalman a 4 stati `[x, y, vx, vy]` in coordinate immagine.
 | Matrice | Nome nel codice | Ruolo |
 |---|---|---|
 | F | `evoluzione_stato` | Modello cinematico a velocità costante, con `dt` reale |
+| B·u | `_ingresso_noto(dt)` | Moto del velivolo, vedi sotto |
 | H | `mappa_osservazione` | Osserva solo posizione x/y |
 | Q | `_matrice_Q(dt)` | Rumore di processo, ricostruito sul `dt` effettivo |
 | R | `incertezza_sensore` | Adattiva, vedi sotto |
-| K | `guadagno_kalman` | Bilancia modello e misura |
+| S | innovazione | Covarianza dell'innovazione: gating e NIS |
+
+**Il moto del velivolo è un ingresso noto, non rumore.** La posizione del
+bersaglio nell'immagine cambia per due motivi: il bersaglio che si muove e il
+velivolo che si muove. Il secondo è **misurato** da MAVROS, e trattarlo come
+rumore di processo costringeva il filtro a spiegare con l'incertezza qualcosa
+che già sapeva. `_ingresso_noto` converte la traslazione del velivolo in
+spostamento d'immagine — in assi velivolo tramite l'imbardata, diviso per
+l'impronta a terra `quota · tan(semicampo)` — e la somma alla predizione.
+
+La conseguenza pratica è sulla grandezza pubblicata: `vx, vy` diventano la
+velocità **propria** del bersaglio e non più quella relativa al velivolo. Prima,
+chi voleva l'assoluta doveva sommarci la velocità del drone, e quella differenza
+fra due grandezze grandi per ottenerne una piccola produceva una stima con
+errore pari al segnale — 10.8 m/s contro un bersaglio che ne percorre 10.0.
+L'ingresso noto da solo non ha però risolto: la misura in volo dava ancora 10.3.
+A spostare il risultato è stata la taratura che gli strumenti nuovi hanno reso
+possibile, descritta più sotto.
+Quando il moto del velivolo non è disponibile o è vecchio, l'ingresso non si
+applica e **la velocità non viene pubblicata affatto**: sarebbe una grandezza
+diversa da quella promessa, e chi la legge non avrebbe modo di accorgersene.
+
+**Le misure implausibili vengono rifiutate, non pesate.** Il disturbo non è
+gaussiano: il 30% dei messaggi è una perdita totale. Un filtro gaussiano senza
+rifiuto non può fare altro che mediare un valore anomalo. Ogni misura passa
+quindi un test sulla distanza di Mahalanobis — la covarianza dell'innovazione
+`S` era già calcolata per il guadagno e veniva buttata — con soglia
+`soglia_gating`, 9.21, cioè il 99% di un chi-quadro a due gradi di libertà.
+
+Un filtro che rifiuta tutto però diverge in silenzio, convinto di sapere dove
+sia il bersaglio. Dopo `max_rifiuti_consecutivi` scarti di fila la spiegazione
+più probabile non è che le misure siano sbagliate ma che lo sia lo stato, e il
+filtro riparte dalla misura.
+
+**Il filtro pubblica il proprio NIS** su `/target/nis`. L'innovazione
+normalizzata vale in media il numero di gradi di libertà della misura — due — se
+`Q` e `R` descrivono la realtà; sopra, il filtro è troppo sicuro di sé, sotto
+troppo prudente. Serve perché `Q` è stata tarata confrontando la stima con la
+posizione vera letta dal simulatore, e su un velivolo reale quella posizione non
+esiste: il NIS usa solo grandezze che il filtro già calcola, quindi è la sola
+taratura ripetibile fuori dalla simulazione. `metriche.py riassumi` ne stampa la
+media con il giudizio, **separando le finestre di disturbo**: lì `R` viene
+gonfiata apposta, e un NIS basso è il comportamento voluto invece che un difetto.
+
+#### Come `Q` e `R` sono state tarate
+
+I due strumenti nuovi hanno trovato subito due difetti, e nessuno dei due era
+quello che sembrava a prima vista.
+
+**`R` si misura, non si sceglie.** È la covarianza del rumore di misura, e quel
+rumore è misurabile: `metriche.py rumore` proietta nell'immagine la posizione
+vera del bersaglio — la stessa geometria che il controllo percorre al contrario
+— e confronta con ciò che il rilevatore riporta. Lo scarto va però separato: la
+parte che **varia lentamente** è errore di modello e in `R` non ci va, perché
+metterla dentro renderebbe il filtro più sordo di quanto già sia. Resta la parte
+bianca, varianza 0.006 sull'asse x e 0.016 sull'asse y, contro lo **0.05** che
+era in uso. Il NIS lo segnalava già: valeva 0.25 invece di 2.0.
+
+**`Q` era stata tarata sul criterio sbagliato.** Il valore precedente, 0.5, era
+stato scelto confrontando la velocità stimata con quella vera e guardando la
+**pendenza della regressione** — cioè l'assenza di distorsione, che a 0.5 valeva
+1.03 e sembrava perfetta. Ma una stima può essere non distorta e insieme
+rumorosissima, ed era esattamente il caso: la correlazione di 0.6, già nota, lo
+diceva senza che nessuno la leggesse come un difetto di taratura.
+
+Spazzando `q` sull'**errore** invece che sulla pendenza — con il filtro vero,
+non una riscrittura della sua matematica, su misure sintetiche col rumore
+misurato in volo:
+
+| `q` | errore | | `q` | errore |
+|---|---|---|---|---|
+| 5.0 | 22.3 m/s | | 0.05 | 4.0 m/s |
+| 0.5 | 9.3 m/s | | **0.01** | **3.0 m/s** |
+| 0.1 | 5.0 m/s | | 0.002 | 3.7 m/s |
+
+I 9.3 m/s previsti per il valore in uso coincidono con i 10.3 misurati in volo:
+il modello sintetico descrive la situazione vera, quindi la spazzata è credibile.
+
+**Esiste un limite, ed è calcolabile.** Con 4.7 m di rumore di posizione e un
+bersaglio che curva a 0.25 rad/s, la finestra di lisciamento ottima è ~1.5 s e
+l'errore minimo raggiungibile è **2.6 m/s**: più corta e domina il rumore, più
+lunga e domina la curvatura della traiettoria. Il 3.0 della spazzata ci arriva
+vicino, il che dice che oltre non si va senza cambiare la misura.
+
+**Ogni strumento misura una cosa sola, e va detto quale.** Il NIS resta fra 1.8
+e 2.2 su tutta la spazzata mentre l'errore varia da 22 a 3 m/s: `R` domina `S` e
+`q` vi entra poco. **Il NIS valida `R`; solo il confronto con una verità valida
+`q`.** In volo il NIS a 0.25 stava segnalando `R`, e leggerlo come un verdetto
+su `q` sarebbe stato un errore.
+
+**Risultato in volo**, tre prove con `R = 0.016` e `q = 0.01`:
+
+| | prima | dopo |
+|---|---|---|
+| Errore della velocità stimata | 10.3 m/s | **6.7 m/s** |
+| Rapporto errore/segnale | 1.03 | **0.67** |
+| NIS senza disturbo | 0.25 | 2.19 · 1.95 · 0.68 |
+
+Il NIS è arrivato dove doveva in due prove su tre. Resta però un divario fra il
+**6.7 misurato in volo e il 3.0 previsto**: in volo entrano l'errore e la
+latenza della velocità che MAVROS riporta — che ora alimenta la predizione
+direttamente — e manovre più aggressive dell'orbita sintetica. È il prossimo
+filo da tirare, e non è ancora stato tirato.
 
 **Q dipende dal `dt`.** Era una matrice costante, sommata identica a ogni
 predizione qualunque fosse il tempo trascorso: al ritmo variabile della
@@ -691,6 +794,10 @@ naturale è dare al filtro la velocità del velivolo come **ingresso noto**, cos
 che stimi direttamente la velocità assoluta del bersaglio invece di ricavarla
 per differenza da un'immagine in cui i due moti sono sovrapposti.
 
+Quell'ingresso è stato poi implementato — si veda la sezione sul filtro — ma
+l'effetto sul termine di anticipo **non è ancora misurato**: finché non lo è,
+il default resta zero.
+
 Un timer dedicato a 10 Hz ripubblica il comando corrente su
 `/mavros/setpoint_velocity/cmd_vel_unstamped`: ArduPilot esce dal controllo in
 velocità se non riceve setpoint con continuità. Pubblica solo in fase `AGGANCIO`
@@ -773,8 +880,9 @@ del progetto assume nullo.
 
 **L'ingresso del filtro, non solo la sua uscita.** Le colonne `jam_x`, `jam_y`,
 `jam_valido` registrano `/target/jammed_position`, cioè il rilevamento **dopo**
-il disturbo — quello che il filtro riceve davvero — e `rumore_rf` il livello
-dichiarato sul datalink, da cui dipende la matrice `R`. Mancavano, e senza di
+il disturbo — quello che il filtro riceve davvero — `rumore_rf` il livello
+dichiarato sul datalink, da cui dipende la matrice `R`, e `nis` l'innovazione
+normalizzata con cui si giudica la coerenza del filtro. Mancavano, e senza di
 esse la domanda «quanto serve il filtro» non è rispondibile con i dati:
 confrontare la sua uscita con il rilevamento pulito misura l'errore residuo, non
 il guadagno, perché l'alternativa al filtro non è il segnale pulito — che
@@ -1195,8 +1303,10 @@ il segno è quello giusto — ma nel farlo produce il numero che decide l'intera
 questione.
 
 Su **18 prove e 5426 campioni**, l'errore mediano della velocità ricostruita
-vale **10.8 m/s**, contro un bersaglio che viaggia a **10.0 m/s**. Ogni singola
-prova concorda, da 7.4 a 20.8 m/s. L'errore è grande quanto il segnale.
+valeva **10.8 m/s**, contro un bersaglio che viaggia a **10.0 m/s**. Ogni
+singola prova concordava, da 7.4 a 20.8 m/s: l'errore era grande quanto il
+segnale. *(Misura del 6 settembre. Dopo la taratura descritta nella sezione sul
+filtro vale 6.7 m/s, rapporto 0.67.)*
 
 Da una grandezza così non si ricava una direzione, e nessun filtraggio a valle
 può cambiarlo: mediana, limite fisico e memoria impediscono il disastro, non
@@ -1236,9 +1346,11 @@ Ciò che è dimostrato è di natura diversa, e non richiede statistica:
 - tre stime di velocità su quattordici erano **fisicamente impossibili**, e ora
   vengono rifiutate;
 - con il limite attivo **nessuna** ricerca si è allontanata dal bersaglio;
-- l'errore della velocità stimata **vale quanto la velocità stessa** — 10.8
+- l'errore della velocità stimata **valeva quanto la velocità stessa** — 10.8
   contro 10.0 m/s su 5426 campioni — ed è la misura che, sola fra tutte quelle
-  di questa sezione, non risente della dispersione.
+  di questa sezione, non risente della dispersione. Dopo la taratura di `Q` e
+  `R` è sceso a 6.7 m/s, rapporto 0.67: migliorato di un terzo, non ancora
+  risolto.
 
 Resta aperto il limite di fondo, che è quello già dichiarato da questo
 progetto: la qualità della stima di velocità. Che sia profondo lo dicono due
@@ -1247,14 +1359,20 @@ campioni, produceva ancora valori oltre il limite fisico, quindi il rumore è
 correlato su tempi più lunghi della finestra e non si elimina filtrando; e
 l'errore mediano eguaglia il segnale su 5426 campioni.
 
-La via indicata dalla struttura del problema resta la stessa: fornire al filtro
-la velocità del velivolo come ingresso noto, così che stimi direttamente la
-velocità assoluta del bersaglio invece di ricavarla per differenza da
-un'immagine in cui i due moti sono sovrapposti. È la stessa direzione già
-indicata dalla prova sul termine di anticipo, e questa sezione la rafforza: due
-funzioni diverse — guida predittiva e ricerca direzionale — si sono fermate
-davanti allo stesso ostacolo, il che è un buon argomento perché sia quello
-l'ostacolo da rimuovere.
+La via indicata dalla struttura del problema è sempre stata la stessa: fornire
+al filtro la velocità del velivolo come ingresso noto, così che stimi
+direttamente la velocità assoluta del bersaglio invece di ricavarla per
+differenza da un'immagine in cui i due moti sono sovrapposti. L'argomento più
+forte a favore non è teorico: **due funzioni indipendenti** — guida predittiva e
+ricerca direzionale — sono state progettate, implementate e misurate
+separatamente, e si sono fermate entrambe davanti alla medesima stima. Quando
+due strade distinte incontrano lo stesso muro, è quel muro il problema.
+
+L'ingresso noto è ora implementato, insieme al rifiuto delle misure
+implausibili e alla pubblicazione del NIS. **L'effetto non è ancora misurato**,
+quindi i due termini che dipendono da quella stima — `k_anticipo` e
+`durata_inseguimento_cieco_s` — restano a zero finché una batteria di prove non
+dirà se conviene riaccenderli.
 
 **Cosa resta acceso.** Il centro della ricerca sull'ultima posizione nota del
 bersaglio, che non dipende dalla velocità e la cui utilità è visibile nel
@@ -1304,6 +1422,7 @@ metriche.py riassumi /ws/metrics/metrics_20260904_181500.csv
 metriche.py confronta /ws/metrics/prova_A.csv /ws/metrics/prova_B.csv
 metriche.py ricerche /ws/metrics/*_cieco8_*.csv
 metriche.py gruppi '*_cieco8_*.csv' '*_spirale_*.csv'
+metriche.py stima /ws/metrics/*.csv
 ```
 
 **Figure.** `grafici.py` rigenera dalle stesse tracce tre figure: lo stato
@@ -1345,6 +1464,19 @@ probabilità su cinque di finire in un campione.
 
 `gruppi` confronta due configurazioni con più prove ciascuna. Esiste per non
 invitare più a usare `confronta` dove non si può: si veda il paragrafo seguente.
+
+`stima` misura la qualità della velocità che il filtro dichiara, ricostruendola
+dalla stima e confrontandola con quella vera letta dal simulatore. Riporta
+l'errore **accanto al segnale che dovrebbe misurare**, perché è il rapporto fra
+i due a contare: un errore di 10 m/s su un bersaglio che ne percorre 10 significa
+che la stima non porta informazione, per quanto il numero possa sembrare piccolo
+in assoluto. È il valore su cui questo progetto ha cambiato idea due volte, e
+ogni volta era stato ricavato da uno script scritto al momento.
+
+Il comando rifiuta le tracce precedenti all'ingresso noto: fino ad allora
+`trk_vx/vy` erano velocità **relative** al velivolo, e applicarvi la conversione
+attuale restituisce un numero sbagliato senza che nulla lo segnali — verificato,
+12.8 e 17.2 m/s contro i 10.8 che la conversione corretta per l'epoca dava.
 
 **Quanto sono ripetibili, in concreto.** Due prove con la stessa configurazione
 e lo stesso seme, da stack riavviato (misura del 4 settembre 2026, 60 s

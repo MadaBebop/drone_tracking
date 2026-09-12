@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
 """Registrazione delle metriche di una prova su file CSV.
 
-Fino a ora ogni misura di questo progetto era uno script Python scritto al
-momento e mai salvato: le cifre riportate nella relazione non erano
-riproducibili da terzi, e due prove della stessa configurazione non erano
-confrontabili perche cambiava anche lo strumento di misura. Questo nodo
-sostituisce quegli script: una riga di CSV per campione, un file per prova.
+Una riga per campione, un file per prova, a frequenza fissa: cosi il file si
+media e si diagramma senza reinterpolare.
 
-Le colonne sono pensate per rispondere alle domande che ricorrono in tutte le
-prove: quanto dura l'aggancio, quanto e distante il drone dal bersaglio, che
-frazione dei campioni contiene il bersaglio, a che ritmo effettivo gira la
-catena di percezione.
-
-Verita a terra. La posizione "vera" di drone e bersaglio viene letta dal
-simulatore (/world/<mondo>/pose/info), non dai topic di MAVROS: la stima
-dell'EKF e essa stessa oggetto di misura, quindi non puo fare da riferimento.
-Vengono registrate entrambe, cosi lo scarto fra le due e visibile nei dati
-invece di restare nascosto in un'assunzione.
+La posizione «vera» di drone e bersaglio viene letta dal simulatore
+(/world/<mondo>/pose/info) e non da MAVROS, perche la stima dell'EKF e essa
+stessa oggetto di misura e non puo fare da riferimento a se stessa. Sono
+registrate entrambe, cosi lo scarto fra le due resta visibile nei dati invece
+di restare nascosto in un'assunzione.
 """
 import csv
 import math
@@ -30,10 +22,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point, PoseStamped, TwistStamped
 from std_msgs.msg import Bool, Float32, Float64, String
 
-# Stesso schema di accesso al simulatore usato da target_mover_node: i binding
-# nativi costano una frazione di millisecondo, il CLI centinaia. Se non sono
-# installati il nodo continua a funzionare, registrando solo cio che arriva da
-# ROS 2 e lasciando vuote le colonne di verita a terra.
+# Binding nativi di gz-transport: costano una frazione di millisecondo contro
+# le centinaia del CLI. Senza, il nodo registra solo cio che arriva da ROS 2.
 try:
     from gz.transport13 import Node as GzNode
     from gz.msgs10.pose_v_pb2 import Pose_V
@@ -44,7 +34,7 @@ except ImportError:
 COLONNE = [
     't_sim', 't_wall', 'fase',
     'det_valido', 'det_x', 'det_y', 'det_area', 'det_hz',
-    'jam_valido', 'jam_x', 'jam_y', 'rumore_rf',
+    'jam_valido', 'jam_x', 'jam_y', 'rumore_rf', 'nis',
     'trk_valido', 'trk_x', 'trk_y', 'trk_area', 'trk_hz',
     'trk_vx', 'trk_vy',
     'ekf_x', 'ekf_y', 'ekf_z', 'roll', 'pitch', 'yaw',
@@ -86,59 +76,48 @@ class MetricsNode(Node):
         self.create_subscription(PoseStamped, '/mavros/local_position/pose',
                                  self.on_posa, qos_mavros)
         self.create_subscription(Point, '/target/position', self.on_detection, 10)
-        # Ingresso vero del filtro: il rilevamento dopo il jammer. E cio che
-        # il filtro deve ripulire, quindi e il termine di paragone corretto per
-        # misurarne il guadagno.
+        # Ingresso vero del filtro, cioe il rilevamento dopo il jammer: e il
+        # termine di paragone corretto per misurarne il guadagno.
         self.create_subscription(Point, '/target/jammed_position',
                                  self.on_disturbata, 10)
         # Livello di rumore dichiarato sul datalink: governa R nel tracker.
         self.create_subscription(Float32, '/rf/noise_level', self.on_rumore, 10)
+        self.create_subscription(Float32, '/target/nis', self.on_nis, 10)
         self.create_subscription(Point, '/target/tracked_position', self.on_tracked, 10)
-        # Velocita stimata dal filtro, in coordinate immagine al secondo e
-        # relativa al drone: e la grandezza su cui si regge la guida
-        # predittiva, quindi va registrata per poterla confrontare con il moto
-        # reale del bersaglio letto dalla verita a terra.
+        # Velocita stimata dal filtro, in coordinate immagine al secondo. Da
+        # confrontare con il moto vero del bersaglio per giudicarne la qualita.
         self.create_subscription(Point, '/target/tracked_velocity',
                                  self.on_tracked_vel, 10)
-        # Velocita del velivolo come la riporta MAVROS. Registrarla accanto
-        # alla posizione vera permette di stabilire in che frame sia
-        # espressa, invece di assumerlo: la guida predittiva la somma alla
-        # stima del filtro, e un frame sbagliato la manda nella direzione
-        # opposta.
+        # Velocita del velivolo. Registrarla accanto alla posizione vera
+        # permette di stabilire in che frame sia espressa invece di assumerlo.
         self.create_subscription(TwistStamped,
                                  '/mavros/local_position/velocity_local',
                                  self.on_velocita_drone, qos_mavros)
         self.create_subscription(Bool, '/gps/jammed', self.on_jam, 10)
-        # Comandi alla sospensione cardanica. Si registra il comando e non
-        # l'angolo effettivo del giunto perche e il comando a dire cosa il nodo
-        # ha chiesto: se il segno fosse sbagliato, si vedrebbe qui confrontato
-        # con la colonna dell'assetto.
+        # Si registra il COMANDO al giunto e non il suo angolo effettivo: e il
+        # comando a dire cosa il nodo ha chiesto, e un segno sbagliato si
+        # vedrebbe qui accanto alla colonna dell'assetto.
         self.create_subscription(Float64, '/gimbal/roll/cmd_pos',
                                  self.on_gimbal_roll, 10)
         self.create_subscription(Float64, '/gimbal/pitch/cmd_pos',
                                  self.on_gimbal_pitch, 10)
-        # Pubblicato da gnss_denial_node, che non esiste ancora: la colonna
-        # resta a 0 finche non c'e. Sottoscriverlo da subito evita di dover
-        # rifare i CSV di riferimento quando arrivera.
+        # Pubblicato da gnss_denial_node; la colonna resta a 0 se non gira.
         self.create_subscription(Bool, '/gps/denial_active', self.on_denial, 10)
 
-        # Ultimo valore visto per ciascuna sorgente. Il campionamento e a
-        # frequenza fissa e indipendente dall'arrivo dei messaggi: un CSV a
-        # passo regolare si media e si diagramma senza reinterpolare.
+        # Ultimo valore visto per ciascuna sorgente: il campionamento e a
+        # frequenza fissa, indipendente dall'arrivo dei messaggi.
         self.fase = 'ATTESA'
         self.ekf = None
         self.det = None
-        # Non `self.jam`: quel nome era gia dello stato del jammer GPS, e
-        # riusarlo lo sovrascriveva con una terna, facendo morire il nodo al
-        # primo campionamento.
+        # Non `self.jam`: quel nome e gia dello stato del jammer GPS.
         self.det_disturbata = None
         self.rumore_rf = None
+        self.nis = None
         self.trk = None
         self.trk_vel = None
         self.jam = False
         self.gps_negato = False
-        # Assetto del corpo: e la grandezza che si accoppia all'inquadratura,
-        # quindi senza di essa l'effetto della stabilizzazione non si misura.
+        # Assetto del corpo: senza, l'effetto della stabilizzazione non si misura.
         self.roll = None
         self.pitch = None
         self.yaw = None
@@ -146,9 +125,8 @@ class MetricsNode(Node):
         self.gimbal_roll = None
         self.gimbal_pitch = None
 
-        # Contatori per il ritmo effettivo della catena di percezione, azzerati
-        # a ogni riga: /target/position segue la telecamera, misurata fra 5 e
-        # 13 Hz a seconda del carico della macchina.
+        # Ritmo effettivo della catena di percezione, azzerato a ogni riga: la
+        # telecamera gira fra 5 e 25 Hz secondo il carico.
         self.n_det = 0
         self.n_trk = 0
 
@@ -171,9 +149,8 @@ class MetricsNode(Node):
         self.gz_node = None
         if GZ_BINDINGS:
             topic = '/world/{}/pose/info'.format(self.mondo)
-            # La firma dei binding di gz-transport e cambiata fra le versioni:
-            # un errore qui non deve impedire la registrazione di tutto il
-            # resto, che arriva da ROS 2 e non da Gazebo.
+            # La firma dei binding cambia fra le versioni, e un errore qui non
+            # deve impedire la registrazione di cio che arriva da ROS 2.
             try:
                 self.gz_node = GzNode()
                 esito = self.gz_node.subscribe(Pose_V, topic, self.on_pose_info)
@@ -202,10 +179,8 @@ class MetricsNode(Node):
 
     def _apri_csv(self):
         cartella = str(self.get_parameter('cartella_output').value)
-        # L'etichetta si rilegge a ogni apertura, non solo all'avvio: cosi
-        # `ros2 param set /metrics_node etichetta_config <nome>` prima di far
-        # partire la missione da il nome alla prova che sta per iniziare, senza
-        # bisogno di rilanciare tutti i nodi.
+        # L'etichetta si rilegge a ogni apertura: cosi `ros2 param set` prima
+        # dell'avvio da il nome alla prova senza rilanciare i nodi.
         self.etichetta = str(self.get_parameter('etichetta_config').value).strip()
         try:
             os.makedirs(cartella, exist_ok=True)
@@ -303,6 +278,9 @@ class MetricsNode(Node):
 
     def on_rumore(self, msg):
         self.rumore_rf = msg.data
+
+    def on_nis(self, msg):
+        self.nis = msg.data
         self.n_det += 1
 
     def on_tracked(self, msg: Point):
@@ -356,12 +334,9 @@ class MetricsNode(Node):
             self.somma_dist += dist_xy_gt
             self.n_dist += 1
         if self.ekf and self.gt_bersaglio:
-            # Distanza calcolata sulla stima dell'EKF invece che sulla verita a
-            # terra. Il progetto assume che il riferimento locale di MAVROS
-            # coincida con quello del mondo Gazebo (lo assume anche
-            # target_mover_node per scegliere la direzione di fuga): il
-            # confronto fra questa colonna e dist_xy_gt e la verifica di
-            # quell'assunzione, non una ripetizione della stessa misura.
+            # Il progetto assume che il riferimento locale di MAVROS coincida
+            # con quello del mondo Gazebo. Questa colonna accanto a dist_xy_gt
+            # e la verifica di quell'assunzione, non una misura ripetuta.
             dist_xy_ekf = round(math.hypot(self.ekf[0] - self.gt_bersaglio[0],
                                            self.ekf[1] - self.gt_bersaglio[1]), 3)
 
@@ -374,6 +349,7 @@ class MetricsNode(Node):
         riga += [1 if (d and d[2] != 0.0) else 0]
         riga += ([round(d[0], 4), round(d[1], 4)] if d else ['', ''])
         riga += [round(self.rumore_rf, 4) if self.rumore_rf is not None else '']
+        riga += [round(self.nis, 3) if self.nis is not None else '']
         riga += [trk_valido] + terna(self.trk) + [round(self.n_trk / dt, 1)]
         riga += ([round(v, 4) for v in self.trk_vel] if self.trk_vel
                  else ['', ''])
@@ -388,6 +364,13 @@ class MetricsNode(Node):
         riga += terna(self.gt_bersaglio)
         riga += [dist_xy_gt, dist_3d_gt, dist_xy_ekf]
         riga += [1 if self.jam else 0, 1 if self.gps_negato else 0]
+
+        # Una riga piu corta dell'intestazione non darebbe errore: sposterebbe
+        # i valori di una casella, e il CSV mentirebbe senza dirlo.
+        if len(riga) != len(COLONNE):
+            raise RuntimeError(
+                'riga da %d valori contro %d colonne dichiarate'
+                % (len(riga), len(COLONNE)))
 
         self.writer.writerow(riga)
         self.file.flush()
