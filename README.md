@@ -284,8 +284,24 @@ dall'esterno del container.
 
 `src/drone_tracking/drone_tracking` e `launch/` sono montati come volume e
 l'immagine è costruita con `--symlink-install`: le modifiche ai file Python sono
-visibili subito, basta riavviare il pannello `nodes`. Serve un `docker compose
-build` solo se cambiano `setup.py`, `package.xml` o gli asset in `sim/`.
+visibili subito, basta riavviare il pannello `nodes`. Sono montati anche
+`setup.py`, `package.xml` e `docker/sitl-defaults.parm`, quindi punti d'ingresso,
+manifesto e taratura dell'autopilota si cambiano a caldo. Serve un `docker
+compose build` solo per gli asset in `sim/`.
+
+**Un nodo nuovo richiede comunque una ricostruzione del workspace**, non
+dell'immagine: il montaggio porta dentro il `setup.py` aggiornato, ma
+l'eseguibile in `install/` lo crea `colcon`.
+
+```bash
+docker exec drone-tracking bash -lc   'source /opt/ros/jazzy/setup.bash && cd /ws && colcon build --symlink-install'
+```
+
+Va rifatto **anche dopo ogni `docker compose up -d` che ricrea il container**:
+`/ws/install` non è un volume, quindi torna allo stato dell'immagine e i nodi
+aggiunti dopo l'ultima build spariscono. Il sintomo è muto — il launch non trova
+l'eseguibile, metà stack non parte e la missione non pubblica mai `/mission/stato`
+— e non assomiglia affatto alla sua causa.
 
 ---
 
@@ -414,6 +430,32 @@ questa convenzione — è ciò che distingue "bersaglio al centro dell'immagine"
 Pubblica anche `/target/debug_image` con contorno, centroide e coordinate
 disegnati sul frame.
 
+#### Plausibilità della taglia
+
+Il rilevatore prendeva il contorno rosso più grande sopra una soglia fissa in
+pixel, e nient'altro: un tetto rosso, un telo, un'auto parcheggiata venivano
+accettati con la stessa fiducia del bersaglio.
+
+Il controllo aggiunto non è euristico ma geometrico. A quota `h` l'impronta a
+terra vale `2·h·tan(semicampo)`, quindi la scala è `(larghezza_px/2)/(h·tan)`
+pixel per metro, e un veicolo di dimensioni note deve occupare un'area precisa
+che cala con **1/h²**. A 50 m un bersaglio di 4 × 2 m vale ~330 px²; un blob
+sessanta volte più grande non è quel bersaglio, e viene scartato con il motivo
+scritto nel log.
+
+La tolleranza è un fattore quattro in più o in meno, che copre l'orientamento
+del veicolo e la visione parziale al bordo dell'inquadratura, dove metà del
+bersaglio è fuori campo e l'area dimezza. Senza quota nota il giudizio non è
+possibile e si accetta: scartare per ignoranza sarebbe peggio, e al decollo la
+quota non è ancora arrivata.
+
+**Un tetto operativo che nasce da qui.** La soglia minima assoluta esiste contro
+il rumore visivo e vale 100 px²; insieme alla legge 1/h² fissa la quota oltre la
+quale il bersaglio è troppo piccolo per essere visto, che è **~90 m**. È più
+bassa dei 120 m che `sicurezza_node` consente per ragioni normative: il limite
+che conta davvero, per questo bersaglio e questa ottica, è quello della
+percezione.
+
 ### jammer_node
 
 Simula un sistema di guerra elettronica che si interpone tra detector e tracker.
@@ -505,7 +547,7 @@ vera del bersaglio — la stessa geometria che il controllo percorre al contrari
 parte che **varia lentamente** è errore di modello e in `R` non ci va, perché
 metterla dentro renderebbe il filtro più sordo di quanto già sia. Resta la parte
 bianca, varianza 0.006 sull'asse x e 0.016 sull'asse y, contro lo **0.05** che
-era in uso. Il NIS lo segnalava già: valeva 0.25 invece di 2.0.
+era in uso. Il NIS lo segnalava già: valeva 0.35 invece di 2.0.
 
 **`Q` era stata tarata sul criterio sbagliato.** Il valore precedente, 0.5, era
 stato scelto confrontando la velocità stimata con quella vera e guardando la
@@ -545,13 +587,24 @@ su `q` sarebbe stato un errore.
 |---|---|---|
 | Errore della velocità stimata | 10.3 m/s | **6.7 m/s** |
 | Rapporto errore/segnale | 1.03 | **0.67** |
-| NIS senza disturbo | 0.25 | 2.19 · 1.95 · 0.68 |
+| NIS senza disturbo | 0.35 | 2.63 · 1.77 · 1.69 |
 
-Il NIS è arrivato dove doveva in due prove su tre. Resta però un divario fra il
+Il NIS è arrivato dove doveva in tutte e tre le prove. Resta però un divario fra il
 **6.7 misurato in volo e il 3.0 previsto**: in volo entrano l'errore e la
 latenza della velocità che MAVROS riporta — che ora alimenta la predizione
 direttamente — e manovre più aggressive dell'orbita sintetica. È il prossimo
 filo da tirare, e non è ancora stato tirato.
+
+> **Questi numeri sono stati corretti.** `metrics_node` teneva l'ultimo NIS
+> ricevuto e lo riscriveva a ogni riga del registro: il filtro lo pubblica a
+> ogni misura corretta, il registro esce a 5 Hz, e con il bersaglio non visibile
+> lo stesso valore restava fermo anche per secondi. Ogni media sulla colonna
+> contava quindi più volte lo stesso campione, pesando i tratti in cui il filtro
+> **non** si pronunciava. La terza prova qui sopra sembrava fallita a 0.68:
+> aveva 97 campioni veri su 377 righe, tre quarti di doppioni. Ora la colonna
+> resta vuota quando non c'è nulla di nuovo, e i tre valori cadono dove
+> dovevano. Vale la pena dirlo perché è un errore di misura che *confermava*
+> quello che ci si aspettava — il genere più difficile da notare.
 
 **Q dipende dal `dt`.** Era una matrice costante, sommata identica a ogni
 predizione qualunque fosse il tempo trascorso: al ritmo variabile della
@@ -1027,6 +1080,83 @@ ricompilare:
 ros2 param set /controller_node kp_x 2.0 && ros2 param set /controller_node kp_y 2.0
 ```
 
+### sicurezza_node
+
+Limiti operativi: cosa il velivolo non deve fare, qualunque cosa chieda la
+missione. Fino a poco fa non esisteva nulla del genere — nessun confine, nessun
+tetto di quota, nessuna sorveglianza della batteria — e un bersaglio che fuggiva
+verso l'orizzonte veniva inseguito finché c'era corrente.
+
+| Limite | Parametro | Default | Perché quel valore |
+|---|---|---|---|
+| Confine | `raggio_max` | 500 m | Il circuito è 150 × 150 m e la fuga arriva a ~260 m dal centro dell'orbita: 500 m è il margine oltre il quale l'inseguimento non è più l'attività che stiamo svolgendo |
+
+Un vincolo che si paga subito se ignorato: **`raggio_max` deve superare la
+diagonale del circuito di pattugliamento**, che per 150 × 150 m vale 212 m.
+Sotto quel valore il blocco scatta al vertice lontano durante il normale
+pattugliamento, prima ancora che ci sia un bersaglio da inseguire — verificato
+in volo con il confine a 200 m.
+| Tetto | `quota_max` | 120 m | Limite della categoria aperta europea |
+| Quota minima | `quota_min` | 5 m | Sotto, la conversione da immagine a metri perde senso |
+| Batteria | `batteria_min` | 0.25 | Frazione di carica sotto la quale si rientra |
+
+Tre scelte di progetto che vale la pena spiegare.
+
+**È un nodo separato, e scavalca la missione.** Una rete di sicurezza che vive
+dentro la logica che deve sorvegliare non è una rete: se `mission_node` si
+blocca in uno stato imprevisto, deve esserci qualcosa di esterno che se ne
+accorge. Il meccanismo con cui scavalca è il **cambio di modo di volo**: fuori
+da `GUIDED` ArduPilot ignora i setpoint di velocità, quindi l'intervento vince
+senza dover convincere nessun altro nodo a smettere.
+
+**Il blocco viene comunque pubblicato** su `/sicurezza/blocco`, e controllo e
+missione lo rispettano smettendo di spingere. Senza, i due continuerebbero a
+pubblicare setpoint e waypoint contro un rientro in corso, e appena il velivolo
+fosse rimesso in `GUIDED` riprenderebbero l'inseguimento come se nulla fosse.
+
+**Il blocco non cade da solo.** Rientrare nel confine non basta: se cadesse
+appena il velivolo torna dentro, la missione riprenderebbe a inseguire e lo
+riporterebbe fuori — un ciclo che entra ed esce dal confine invece di fermarsi.
+Si sgancia solo con un `/sicurezza/reset` esplicito, che è una decisione di chi
+comanda e non del sistema.
+
+Una distinzione che sembra un dettaglio e non lo è: MAVROS riporta `-1` quando
+la carica non è misurata, e confonderlo con lo zero fermerebbe ogni volo su un
+velivolo che non riporta la percentuale. «Non misurata» e «scarica» sono cose
+diverse, e il nodo le tiene separate. In questo simulatore la percentuale non
+esiste — il SITL riporta `-0.01` — quindi **il limite di batteria è verificato
+in prova ma non esercitabile in volo qui**.
+
+#### Verifica in volo
+
+Con il confine abbassato a 250 m perché l'inseguimento lo superasse davvero:
+
+```
+t= 79 s   196 m dall'origine   AGGANCIO    aggancia il bersaglio
+t= 91 s   298 m                AGGANCIO    inseguendo, supera il confine
+t=103 s    95 m                RICERCA     sta rientrando
+t=115 s     0 m                RICERCA     a casa
+...          0 m                           e ci resta per i restanti 190 s
+```
+
+Blocco a 258 m, modo finale `RTL`, e nessuna ripresa dell'inseguimento benché il
+bersaglio continuasse a orbitare a portata. Due numeri che ne escono e che
+contano per chi sceglie i valori:
+
+- **l'escursione oltre il confine è stata di 59 m**, da 250 a 308.8, perché a
+  20 m/s fermarsi e invertire richiede tempo. Il confine non è una barriera: è
+  la soglia oltre la quale si comincia a fermarsi, e va scelto con quel margine;
+- **`raggio_max` deve superare la diagonale del circuito**, 212 m per 150 × 150.
+  Con il confine a 200 m il blocco scattava al vertice lontano durante il
+  normale pattugliamento, prima ancora che ci fosse un bersaglio da inseguire.
+
+Il volo ha anche trovato due difetti che le prove a banco non avevano preso, ed
+è la ragione per cui si prova in volo: un `RTL` comandato **durante il decollo**,
+a 1 m di quota, perché il limite inferiore non distingueva «sotto il minimo» da
+«ci sto arrivando»; e una missione che, bloccata, continuava ad avanzare di fase
+scrivendo `AGGANCIO` nel registro mentre il velivolo rientrava — nessun comando
+usciva davvero, ma la prova mentiva a chi poi la analizza.
+
 ### gnss_denial_node
 
 Attacca il ricevitore satellitare **del drone**, iniettando il disturbo nei
@@ -1383,6 +1513,99 @@ renderebbe sensata.
 
 ---
 
+## Latenza della catena: cosa dicono le misure
+
+In simulazione fra otturatore e rilevamento non passava quasi niente, quindi il
+progetto ha sempre trattato l'istante d'arrivo di un messaggio come l'istante a
+cui il dato si riferiva. Su hardware i due differiscono di 50–150 ms. Prima di
+cambiare il contratto fra sei nodi per marcarli temporalmente, si è misurato se
+il danno lo giustificasse.
+
+### Quanto costa
+
+Il rilevatore sa iniettare un ritardo (`ritardo_s`, default `0.0`): trattiene i
+rilevamenti in coda e li rilascia più tardi, **conservando l'istante originale**.
+Quattro voli di due minuti, due per configurazione:
+
+| | 0 s | 0,15 s |
+|---|---|---|
+| errore sulla stima di velocità | 5,6 · 5,9 m/s | 7,6 · 7,3 m/s |
+| bersaglio inquadrato in `AGGANCIO` | 67 % · 74 % | 54 % · 55 % |
+| distanza mediana in `AGGANCIO` | 25 · 36 m | 42 · 41 m |
+| durata mediana dell'aggancio | 38,0 s | 8,4 s |
+
+Quattro indicatori indipendenti degradano insieme, e le due prove di ogni
+configurazione cadono vicine. Il conto torna con la geometria: a 10 m/s, 0,15 s
+sono 1,5 m di ritardo, che a 50 m di quota valgono 0,03 in coordinate
+normalizzate, **circa il doppio del rumore di misura** (0,016). Ma è un errore
+costante e direzionale, quindi non si media via, e arriva dentro un anello
+chiuso con un termine derivativo: sfasare la retroazione costa più di quanto la
+sua ampiezza suggerisca.
+
+### Il numero che ha deciso
+
+**Il NIS non si muove**: 1,05 senza ritardo, 1,03 e 1,07 con.
+
+Non è un difetto della diagnostica. Un ritardo puro applicato a una traiettoria
+regolare *è* una traiettoria regolare: le innovazioni restano statisticamente
+coerenti perché il filtro sta stimando fedelmente dov'era il bersaglio un
+istante fa. **È sano e sbagliato allo stesso tempo**, e nessun controllo a tempo
+d'esecuzione può distinguerlo. Un difetto che non si può sorvegliare va tolto
+per costruzione: è questo, e non la dimensione del danno, ad aver deciso il
+cambio dei contratti.
+
+### Cosa si è cambiato
+
+I quattro topic della catena sono passati da `Point` a `PointStamped`. L'istante
+propagato è quello **dell'otturatore**, copiato dall'header dell'immagine e non
+generato al momento della pubblicazione: così la marcatura copre anche il ponte
+della telecamera. Il jammer lo lascia passare intatto, perché disturbare un
+canale cambia il valore e non quando la scena è stata guardata.
+
+Il filtro ne fa due usi:
+
+- il `dt` della predizione si calcola **fra gli istanti dichiarati**, non fra gli
+  arrivi, che includono un trasporto variabile;
+- prima di pubblicare, lo stato viene **portato avanti fino ad adesso** —
+  velocità di stato per l'età della misura, più il termine noto del moto del
+  velivolo sullo stesso intervallo. L'estrapolazione ha un tetto
+  (`eta_massima_misura_s`, 0,3 s): oltre, l'errore sulla velocità moltiplicato
+  per il tempo supera il ritardo che si sta correggendo.
+
+### Se è servito
+
+Stesse quattro prove, stessa latenza iniettata, codice nuovo:
+
+| a 0,15 s di latenza | prima | dopo |
+|---|---|---|
+| errore sulla stima di velocità | 7,6 · 7,3 m/s | **5,6 · 6,7 m/s** |
+| bersaglio inquadrato in `AGGANCIO` | 54 % · 55 % | **76 % · 77 %** |
+| distanza mediana in `AGGANCIO` | 42 · 41 m | **31 · 34 m** |
+| durata mediana dell'aggancio | 8,4 s | **40,0 s** |
+
+Entrambe le prove concordano, e riportano il sistema al livello che aveva senza
+alcuna latenza: la correzione non attenua il danno, lo annulla.
+
+**A latenza iniettata zero non cambia nulla di misurabile** (4,5 e 7,4 m/s
+contro 5,6 e 5,9; inquadratura 75 % e 60 % contro 67 % e 74 %): la dispersione
+fra prove copre la differenza. Anche questo torna, perché ora la latenza vera
+della catena si può misurare invece di supporla — confrontando l'istante
+dichiarato con quello d'arrivo, sullo stesso orologio dei nodi:
+
+```
+immagine      33,0 ms di età all'arrivo   (massimo 36)
+rilevamento   35,1 ms
+```
+
+Trentacinque millisecondi, di cui 33 nel ponte della telecamera e 2 nel
+rilevamento. A 10 m/s sono 35 cm: un quinto di quello che costano 0,15 s, e
+sotto la soglia in cui il resto del sistema se ne accorge. **La marcatura non
+serve a questa simulazione: serve al velivolo vero**, dove la catena costa da
+tre a cinque volte tanto, ed era l'unica configurazione in cui il difetto si
+poteva ancora misurare prima di incontrarlo.
+
+---
+
 ## Misura e ripetibilità
 
 Le cifre citate in questo documento nascevano da script Python scritti sul
@@ -1603,9 +1826,10 @@ container.
 Due note su quel file. `ARMING_CHECK` **non esiste** in questa versione di
 ArduPilot e viene ignorato in silenzio, lasciando tutti i controlli attivi: il
 parametro giusto è `ARMING_SKIPCHK`, con logica inversa, dove `1` significa
-"salta tutto". E i `SIM_*_RND` azzerano il rumore degli IMU simulati, perché
-quando la fisica singhiozza i tre giroscopi divergono e l'arming viene rifiutato
-con `Arm: Gyros inconsistent`, un controllo che `ARMING_SKIPCHK` non copre.
+"salta tutto". Qui vale **`0`**, cioè tutti i controlli attivi. E i `SIM_*_RND`
+azzerano il rumore degli IMU simulati, perché quando la fisica singhiozza i tre
+giroscopi divergono e l'arming viene rifiutato con `Arm: Gyros inconsistent`,
+un controllo che `ARMING_SKIPCHK` non copre.
 
 ### Prima di ogni prova
 
@@ -1686,10 +1910,16 @@ arm throttle
 takeoff 12
 ```
 
-I controlli di arming sono già disabilitati da `ARMING_SKIPCHK 1`, caricato
-all'avvio del SITL da `docker/sitl-defaults.parm`. Se l'arming viene rifiutato con
-`Arm: Gyros inconsistent`, quel file non è stato caricato: si può impostare il
-parametro a mano con `param set ARMING_SKIPCHK 1` prima di `arm throttle`.
+I controlli di arming sono **attivi** (`ARMING_SKIPCHK 0`, caricato all'avvio
+del SITL da `docker/sitl-defaults.parm`). Dopo un avvio a freddo il primo
+tentativo può essere rifiutato con `Arm: Gyros inconsistent`: si ritenta, e passa.
+`takeoff.sh` lo fa da solo fino a cinque volte.
+
+> MAVProxy annuncia `Arming checks disabled` a ogni armamento **anche quando i
+> controlli sono attivi**. Non è una diagnosi: il suo modulo `arm` legge
+> `ARMING_CHECK`, che in questa versione non esiste, ottiene `None` e conclude
+> che i controlli siano spenti. È lo stesso scarto di nome descritto sopra, che
+> qui produce un messaggio rassicurante e falso, in entrambe le direzioni.
 
 **T7 — Avvio missione**
 
@@ -1711,10 +1941,20 @@ guadagni, che sono in unità fisiche, ma l'ampiezza dell'area inquadrata.
 | Topic | Tipo | Descrizione |
 |---|---|---|
 | `/drone/camera/image_raw` | `sensor_msgs/Image` | Feed telecamera dal ponte ros_gz |
-| `/target/position` | `geometry_msgs/Point` | Posizione grezza dal detector (`z` = area) |
-| `/target/jammed_position` | `geometry_msgs/Point` | Posizione corrotta dal jammer |
-| `/target/tracked_position` | `geometry_msgs/Point` | Stima filtrata dal Kalman |
+| `/target/position` | `geometry_msgs/PointStamped` | Posizione grezza dal detector (`point.z` = area) |
+| `/target/jammed_position` | `geometry_msgs/PointStamped` | Posizione corrotta dal jammer |
+| `/target/tracked_position` | `geometry_msgs/PointStamped` | Stima filtrata dal Kalman, portata all'istante dell'header |
+| `/target/tracked_velocity` | `geometry_msgs/PointStamped` | Velocità del bersaglio in unità immagine/s (`point.z` = 1 se valida) |
+| `/target/nis` | `std_msgs/Float32` | Innovazione normalizzata del filtro |
 | `/target/debug_image` | `sensor_msgs/Image` | Frame annotato per il debug |
+
+L'header non è decorativo. Su tutta la catena porta **l'istante dell'otturatore**,
+copiato dall'header dell'immagine e propagato invariato attraverso il jammer:
+disturbare un canale cambia il valore, non quando la scena è stata guardata. Il
+filtro lo usa per due cose — calcolare il `dt` della predizione fra gli istanti
+dichiarati invece che fra gli arrivi, e portare la stima fino ad adesso prima di
+pubblicarla. Su `/target/tracked_position` l'header dice a quale istante la stima
+si riferisce, che dopo l'estrapolazione non è più quello della misura.
 
 ### Guerra elettronica
 
@@ -2114,8 +2354,16 @@ Il parametro che li disattiva è **`ARMING_SKIPCHK`**, non `ARMING_CHECK`.
 Quest'ultimo non esiste in questa versione di ArduPilot e viene **ignorato in
 silenzio**: si crede di aver disabilitato i controlli e invece sono tutti
 attivi. `ARMING_SKIPCHK` ha inoltre logica inversa — `1` significa "salta
-tutto", non "controlla tutto". Il valore corretto è caricato all'avvio da
-`docker/sitl-defaults.parm`, caricato da entrambi gli ambienti tramite --defaults.
+tutto", non "controlla tutto".
+
+**Oggi vale `0`: i controlli sono tutti attivi.** Ha volato a lungo con `1`, che
+però spegneva una ventina di controlli per aggirarne uno, nascondendo con quello
+qualunque altro difetto del velivolo al momento di armare — e su hardware la
+scorciatoia non esiste. La prova del 12/09, con la EEPROM cancellata perché i
+default fossero autoritativi: il primo tentativo rifiutato con
+`Arm: Gyros inconsistent`, il secondo accettato, decollo regolare a 43 m. Il
+ciclo di ritentativi di `takeoff.sh`, nato per i rifiuti transitori, copre il
+caso senza altre modifiche.
 
 **Plugin `TrajectoryFollower` inerte** — il modello `bersaglio` dichiara un
 `gz-sim-trajectory-follower-system` con cinque waypoint, ma quel percorso non ha

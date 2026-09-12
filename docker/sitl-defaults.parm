@@ -4,9 +4,18 @@
 # ATTENZIONE al nome: in questa versione di ArduPilot il parametro NON si chiama
 # ARMING_CHECK, che non esiste e viene ignorato in silenzio lasciando tutti i
 # controlli attivi. Si chiama ARMING_SKIPCHK e ha logica inversa: 1 = salta tutto.
-# Senza, l'arming fallisce con "Arm: Gyros inconsistent" o "Accels inconsistent",
-# perche gli IMU simulati divergono quando la fisica singhiozza.
-ARMING_SKIPCHK 1
+#
+# Sta a 0, cioe TUTTI i controlli attivi, ed e una scelta verificata e non
+# scontata: il progetto ha volato a lungo con 1. Spegnerli tutti serviva ad
+# aggirarne uno solo — il confronto fra i giroscopi simulati — ma nascondeva
+# insieme a quello qualunque altro difetto il velivolo avesse al momento di
+# armare, ed e una scorciatoia irripetibile su hardware.
+#
+# Prova del 12/09: con la EEPROM cancellata, cosi che questo file sia
+# autoritativo, il primo tentativo viene rifiutato con "Arm: Gyros inconsistent"
+# e il successivo passa. Il ciclo di ritentativi di takeoff.sh, nato per i
+# rifiuti transitori, assorbe il caso senza modifiche.
+ARMING_SKIPCHK 0
 
 # --- Prestazioni, dimensionate su un bersaglio a 15 m/s (54 km/h) ---
 # Il tetto di velocita deve superare quello del bersaglio, altrimenti il drone

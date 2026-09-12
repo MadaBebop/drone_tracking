@@ -16,14 +16,16 @@ import math
 
 import pytest
 import rclpy
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float64, String
+from std_msgs.msg import Bool, Float64, String
 
 from drone_tracking.controller_node import ControllerNode
+from drone_tracking.detector_node import DetectorNode
 from drone_tracking.gimbal_node import GimbalNode
 from drone_tracking.gnss_denial_node import MODI, GnssDenialNode
 from drone_tracking.mission_node import FaseMissione, MissionNode
+from drone_tracking.sicurezza_node import SicurezzaNode
 from drone_tracking.tracker_node import TrackerNode
 
 
@@ -36,6 +38,21 @@ def contesto_ros():
 
 def ora(nodo):
     return nodo.get_clock().now().nanoseconds / 1e9
+
+
+def punto(x=0.0, y=0.0, z=0.0, t=None):
+    """Un messaggio di posizione come lo pubblicano i nodi.
+
+    Senza `t` resta senza marcatura, e chi lo riceve ripiega sull'ora
+    d'arrivo: non e una scorciatoia della prova, e il caso da verificare
+    quando un produttore non marca.
+    """
+    m = PointStamped()
+    m.point.x, m.point.y, m.point.z = float(x), float(y), float(z)
+    if t is not None:
+        m.header.stamp.sec = int(t)
+        m.header.stamp.nanosec = int((t - int(t)) * 1e9)
+    return m
 
 
 def controller_in_aggancio():
@@ -64,7 +81,7 @@ def test_compensazione_dassetto_lavora_sugli_angoli():
         u = 0.3
         nodo.roll = math.atan(u * nodo.tan_semi_fov_o)
         nodo.pitch = 0.0
-        nodo.on_tracked(Point(x=u, y=0.0, z=300.0))
+        nodo.on_tracked(punto(x=u, y=0.0, z=300.0))
         assert abs(nodo.cmd_corrente.linear.x) < 1e-6
         assert abs(nodo.cmd_corrente.linear.y) < 1e-6
     finally:
@@ -88,7 +105,7 @@ def test_compensazione_tiene_conto_del_gimbal():
         nodo.gimbal_roll = -0.30
         nodo.pitch = 0.0
         nodo.gimbal_pitch = 0.0
-        nodo.on_tracked(Point(x=0.0, y=0.0, z=300.0))
+        nodo.on_tracked(punto(x=0.0, y=0.0, z=300.0))
         assert abs(nodo.cmd_corrente.linear.y) < 1e-6
         assert abs(nodo.cmd_corrente.linear.x) < 1e-6
 
@@ -97,7 +114,7 @@ def test_compensazione_tiene_conto_del_gimbal():
         nodo.roll = 0.60
         nodo.gimbal_roll = -0.45
         residuo = 0.15
-        nodo.on_tracked(Point(x=math.tan(residuo) / nodo.tan_semi_fov_o,
+        nodo.on_tracked(punto(x=math.tan(residuo) / nodo.tan_semi_fov_o,
                               y=0.0, z=300.0))
         assert abs(nodo.cmd_corrente.linear.y) < 1e-6, (
             'il residuo di saturazione deve essere ancora compensato')
@@ -191,14 +208,15 @@ def test_la_velocita_predetta_non_e_valida():
     """
     nodo = tracker_con_velivolo()
     pubblicate = []
-    nodo._pubblica_velocita = lambda valida: pubblicate.append(valida)
+    nodo._pubblica_velocita = (
+        lambda valida, istante=None: pubblicate.append(valida))
     try:
-        nodo.on_detection(Point(x=0.1, y=0.1, z=100.0))   # acquisizione
+        nodo.on_detection(punto(x=0.1, y=0.1, z=100.0))   # acquisizione
         nodo.istante_vel_drone = ora(nodo)
-        nodo.on_detection(Point(x=0.2, y=0.1, z=100.0))   # misura
+        nodo.on_detection(punto(x=0.2, y=0.1, z=100.0))   # misura
         assert pubblicate[-1] is True, 'una misura deve valere una velocita'
 
-        nodo.on_detection(Point(x=0.0, y=0.0, z=0.0))     # niente segnale
+        nodo.on_detection(punto(x=0.0, y=0.0, z=0.0))     # niente segnale
         assert pubblicate[-1] is False, (
             'la velocita predetta e stata pubblicata come valida')
     finally:
@@ -323,11 +341,11 @@ def test_la_mediana_scarta_le_inversioni_di_direzione():
 def test_coasting_smorza_invece_di_azzerare():
     nodo = controller_in_aggancio()
     try:
-        nodo.on_tracked(Point(x=0.3, y=0.2, z=300.0))
+        nodo.on_tracked(punto(x=0.3, y=0.2, z=300.0))
         base = nodo.cmd_corrente.linear.x
         assert abs(base) > 0.1, 'il comando di partenza deve essere non nullo'
 
-        nodo.on_tracked(Point(x=0.0, y=0.0, z=0.0))
+        nodo.on_tracked(punto(x=0.0, y=0.0, z=0.0))
         # Tolleranza larga: fra la perdita e questa riga passano microsecondi di
         # orologio reale, che la rampa di smorzamento conta comunque.
         assert abs(nodo._comando_da_pubblicare().linear.x - base) < 0.05
@@ -352,9 +370,9 @@ def test_guardia_fov_passa_al_coasting():
     """
     nodo = controller_in_aggancio()
     try:
-        nodo.on_tracked(Point(x=0.4, y=0.3, z=300.0))
+        nodo.on_tracked(punto(x=0.4, y=0.3, z=300.0))
         base = nodo.cmd_corrente.linear.x
-        nodo.on_tracked(Point(x=1.5, y=0.3, z=300.0))
+        nodo.on_tracked(punto(x=1.5, y=0.3, z=300.0))
         assert nodo.istante_perdita_vista is not None
         assert abs(nodo._comando_da_pubblicare().linear.x) > 0.9 * abs(base)
     finally:
@@ -364,7 +382,7 @@ def test_guardia_fov_passa_al_coasting():
 def test_watchdog_azzera_e_segnala():
     nodo = controller_in_aggancio()
     try:
-        nodo.on_tracked(Point(x=0.3, y=0.2, z=300.0))
+        nodo.on_tracked(punto(x=0.3, y=0.2, z=300.0))
         nodo.pubblica_velocita_continua()
         assert nodo._ingressi_scaduti() == []
 
@@ -419,6 +437,85 @@ def tracker_con_velivolo(avanti=0.0, laterale=0.0, quota=50.0):
     return nodo
 
 
+def test_il_dt_viene_dagli_istanti_non_dall_arrivo():
+    """Due misure distanti mezzo secondo, consegnate una dopo l'altra.
+
+    Prima di marcare i messaggi, il filtro avrebbe letto un dt di pochi
+    microsecondi — il tempo fra le due chiamate — e attribuito alla dinamica
+    del bersaglio un salto che era solo trasporto accumulato.
+    """
+    nodo = tracker_con_velivolo()
+    try:
+        t0 = 1000.0
+        nodo.on_detection(punto(x=0.1, y=0.1, z=100.0, t=t0))
+        nodo.on_detection(punto(x=0.2, y=0.1, z=100.0, t=t0 + 0.5))
+        assert abs(nodo.evoluzione_stato[0, 2] - 0.5) < 1e-3, (
+            'il dt non viene dagli istanti dichiarati')
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_stima_pubblicata_e_portata_ad_adesso():
+    """Il filtro stima dov'era il bersaglio; chi insegue vuole dov'e.
+
+    Lo stato si riferisce all'istante dell'otturatore. Pubblicarlo tale e
+    quale significa comandare verso un punto vecchio quanto la catena di
+    percezione: un errore costante e direzionale, che non si media via e che
+    il NIS non puo vedere.
+    """
+    nodo = tracker_con_velivolo()
+    nodo.pub = Raccoglitore()
+    try:
+        nodo.stato_stimato[0, 0] = 0.10
+        nodo.stato_stimato[1, 0] = 0.0
+        nodo.stato_stimato[2, 0] = 1.0   # unita normalizzate al secondo
+        nodo.stato_stimato[3, 0] = 0.0
+        eta = 0.2
+        nodo._pubblica_posizione(300.0, ora(nodo) - eta)
+        pubblicato = nodo.pub.messaggi[-1].point.x
+        assert abs(pubblicato - (0.10 + 1.0 * eta)) < 0.02, (
+            'la stima non e stata portata avanti: pubblicato {:.3f}'.format(
+                pubblicato))
+    finally:
+        nodo.destroy_node()
+
+
+def test_l_estrapolazione_ha_un_tetto():
+    """Una misura vecchia non autorizza a inventare.
+
+    Estrapolare moltiplica l'errore sulla velocita per il tempo: oltre il
+    tetto si aggiungerebbe piu incertezza di quanto ritardo si toglie. Meglio
+    una stima dichiaratamente vecchia che una recente e inventata.
+    """
+    nodo = tracker_con_velivolo()
+    nodo.pub = Raccoglitore()
+    try:
+        nodo.stato_stimato[0, 0] = 0.0
+        nodo.stato_stimato[2, 0] = 1.0
+        nodo._pubblica_posizione(300.0, ora(nodo) - 5.0)
+        pubblicato = nodo.pub.messaggi[-1].point.x
+        assert pubblicato <= nodo.eta_massima_s + 1e-6, (
+            'estrapolati 5 s: {:.3f}'.format(pubblicato))
+    finally:
+        nodo.destroy_node()
+
+
+def test_senza_marcatura_il_filtro_ripiega_sull_arrivo():
+    """Un produttore che non marca non deve far cadere il filtro.
+
+    Il ripiego e il comportamento vecchio, cioe l'ora d'arrivo: peggiore, ma
+    definito, e dichiarato a chi legge i registri invece che silenzioso.
+    """
+    nodo = tracker_con_velivolo()
+    try:
+        nodo.on_detection(punto(x=0.1, y=0.1, z=100.0))
+        nodo.on_detection(punto(x=0.12, y=0.1, z=100.0))
+        assert nodo.bersaglio_acquisito, 'il filtro non regge un messaggio non marcato'
+        assert nodo.ultimo_istante is not None
+    finally:
+        nodo.destroy_node()
+
+
 def test_ingresso_noto_scarta_il_moto_del_velivolo():
     """Bersaglio fermo, velivolo che avanza: la velocita stimata resta nulla.
 
@@ -437,7 +534,7 @@ def test_ingresso_noto_scarta_il_moto_del_velivolo():
         for i in range(15):
             nodo.ultimo_istante = ora(nodo) - dt
             nodo.istante_vel_drone = ora(nodo)
-            nodo.on_detection(Point(x=0.0, y=passo * i, z=300.0))
+            nodo.on_detection(punto(x=0.0, y=passo * i, z=300.0))
         vy = float(nodo.stato_stimato[3].item())
         assert abs(vy) < 0.05, (
             'il filtro attribuisce al bersaglio il moto del velivolo: %.3f' % vy)
@@ -450,7 +547,7 @@ def test_ingresso_noto_scarta_il_moto_del_velivolo():
     try:
         for i in range(15):
             cieco.ultimo_istante = ora(cieco) - dt
-            cieco.on_detection(Point(x=0.0, y=passo * i, z=300.0))
+            cieco.on_detection(punto(x=0.0, y=passo * i, z=300.0))
         vy = float(cieco.stato_stimato[3].item())
         assert vy > 0.1, 'controprova non significativa: %.3f' % vy
     finally:
@@ -465,11 +562,12 @@ def test_senza_moto_del_velivolo_la_velocita_non_si_pubblica():
     """
     nodo = TrackerNode()
     pubblicate = []
-    nodo._pubblica_velocita = lambda valida: pubblicate.append(valida)
+    nodo._pubblica_velocita = (
+        lambda valida, istante=None: pubblicate.append(valida))
     try:
-        nodo.on_detection(Point(x=0.1, y=0.1, z=100.0))
+        nodo.on_detection(punto(x=0.1, y=0.1, z=100.0))
         nodo.ultimo_istante = ora(nodo) - 0.1
-        nodo.on_detection(Point(x=0.12, y=0.1, z=100.0))
+        nodo.on_detection(punto(x=0.12, y=0.1, z=100.0))
         assert pubblicate[-1] is False
     finally:
         nodo.destroy_node()
@@ -490,12 +588,12 @@ def test_misura_implausibile_viene_rifiutata():
         for i in range(20):
             nodo.ultimo_istante = ora(nodo) - 0.1
             nodo.istante_vel_drone = ora(nodo)
-            nodo.on_detection(Point(x=0.0, y=0.0, z=300.0))
+            nodo.on_detection(punto(x=0.0, y=0.0, z=300.0))
         prima = float(nodo.stato_stimato[0].item())
 
         nodo.ultimo_istante = ora(nodo) - 0.1
         nodo.istante_vel_drone = ora(nodo)
-        nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))   # salto impossibile
+        nodo.on_detection(punto(x=0.9, y=0.0, z=300.0))   # salto impossibile
         dopo = float(nodo.stato_stimato[0].item())
 
         assert nodo.rifiuti_consecutivi == 1, 'la misura non e stata rifiutata'
@@ -523,11 +621,11 @@ def test_il_gating_scarta_un_valore_isolato_ma_segue_un_trasferimento():
         for i in range(20):
             nodo.ultimo_istante = ora(nodo) - 0.1
             nodo.istante_vel_drone = ora(nodo)
-            nodo.on_detection(Point(x=0.0, y=0.0, z=300.0))
+            nodo.on_detection(punto(x=0.0, y=0.0, z=300.0))
 
         nodo.ultimo_istante = ora(nodo) - 0.1
         nodo.istante_vel_drone = ora(nodo)
-        nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))
+        nodo.on_detection(punto(x=0.9, y=0.0, z=300.0))
         assert nodo.rifiuti_consecutivi == 1, 'il primo salto non e stato scartato'
         assert abs(float(nodo.stato_stimato[0].item())) < 0.05, (
             'lo stato ha seguito un valore isolato')
@@ -535,7 +633,7 @@ def test_il_gating_scarta_un_valore_isolato_ma_segue_un_trasferimento():
         for i in range(6):
             nodo.ultimo_istante = ora(nodo) - 0.1
             nodo.istante_vel_drone = ora(nodo)
-            nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))
+            nodo.on_detection(punto(x=0.9, y=0.0, z=300.0))
         assert abs(float(nodo.stato_stimato[0].item()) - 0.9) < 0.15, (
             'il filtro non ha seguito un trasferimento che insiste: %.3f'
             % nodo.stato_stimato[0].item())
@@ -554,13 +652,13 @@ def test_dopo_troppi_rifiuti_il_filtro_riacquisisce():
     """
     nodo = tracker_con_velivolo()
     try:
-        nodo.on_detection(Point(x=0.0, y=0.0, z=300.0))   # acquisizione
+        nodo.on_detection(punto(x=0.0, y=0.0, z=300.0))   # acquisizione
         nodo.soglia_gating = 1e-9                         # varco impossibile
 
         for i in range(nodo.max_rifiuti + 1):
             nodo.ultimo_istante = ora(nodo) - 0.1
             nodo.istante_vel_drone = ora(nodo)
-            nodo.on_detection(Point(x=0.9, y=0.0, z=300.0))
+            nodo.on_detection(punto(x=0.9, y=0.0, z=300.0))
 
         assert abs(float(nodo.stato_stimato[0].item()) - 0.9) < 1e-6, (
             'il filtro non e ripartito dalla misura')
@@ -601,7 +699,7 @@ def test_velocita_stimata_segue_il_moto_reale():
         dt = 0.1          # secondi fra due campioni  -> 0.5 u/s
         for i in range(15):
             nodo.ultimo_istante = ora(nodo) - dt
-            nodo.on_detection(Point(x=passo * i, y=0.0, z=300.0))
+            nodo.on_detection(punto(x=passo * i, y=0.0, z=300.0))
         vx = float(nodo.stato_stimato[2].item())
         assert 0.2 < vx < 0.8, 'velocita stimata fuori scala: %.3f' % vx
     finally:
@@ -613,10 +711,10 @@ def test_predizione_estrapola_durante_la_perdita():
     try:
         for i in range(10):
             nodo.ultimo_istante = ora(nodo) - 0.1
-            nodo.on_detection(Point(x=0.05 * i, y=0.0, z=300.0))
+            nodo.on_detection(punto(x=0.05 * i, y=0.0, z=300.0))
         prima = float(nodo.stato_stimato[0].item())
         nodo.ultimo_istante = ora(nodo) - 0.1
-        nodo.on_detection(Point(x=0.0, y=0.0, z=0.0))   # segnale assente
+        nodo.on_detection(punto(x=0.0, y=0.0, z=0.0))   # segnale assente
         dopo = float(nodo.stato_stimato[0].item())
         assert dopo > prima, 'la predizione deve avanzare, non restare ferma'
     finally:
@@ -743,6 +841,272 @@ def test_gnss_ogni_modo_ha_un_valore_di_riposo_distinto():
         assert attacco != riposo, modo
 
 
+def immagine_con_rosso(larghezza_px, altezza_px, dimensione=(640, 480)):
+    """Fotogramma nero con un rettangolo rosso al centro, delle dimensioni date."""
+    import numpy as np
+    w, h = dimensione
+    frame = np.zeros((h, w, 3), dtype=np.uint8)
+    x0 = w // 2 - larghezza_px // 2
+    y0 = h // 2 - altezza_px // 2
+    frame[y0:y0 + altezza_px, x0:x0 + larghezza_px] = (0, 0, 255)   # BGR
+    return frame
+
+
+def detector_in_volo(quota=50.0):
+    nodo = DetectorNode()
+    nodo.fase_missione = FaseMissione.PATTUGLIAMENTO.value
+    nodo.quota = quota
+    nodo.target_pub = Raccoglitore()
+    nodo.debug_pub = Raccoglitore()
+    return nodo
+
+
+def _rileva(nodo, larghezza_px, altezza_px):
+    frame = immagine_con_rosso(larghezza_px, altezza_px)
+    nodo.on_image(nodo.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
+    return nodo.target_pub.messaggi[-1]
+
+
+def test_rilevatore_accetta_un_bersaglio_della_taglia_giusta():
+    """A 50 m un veicolo di 4x2 m occupa ~330 px quadrati: quello va accettato."""
+    nodo = detector_in_volo(quota=50.0)
+    try:
+        msg = _rileva(nodo, 26, 13)
+        assert msg.point.z > 0.0, 'bersaglio della taglia attesa rifiutato'
+        assert abs(msg.point.x) < 0.05 and abs(msg.point.y) < 0.05, 'centro sbagliato'
+    finally:
+        nodo.destroy_node()
+
+
+def test_rilevatore_scarta_un_rosso_troppo_grande():
+    """Un tetto rosso non e un veicolo, e la quota lo dice.
+
+    A 50 m il bersaglio deve occupare ~330 px quadrati: ventimila sono sessanta
+    volte tanto. Prima veniva accettato, perche l'unico controllo era una soglia
+    minima e nulla impediva a un contorno enorme di superarla.
+    """
+    nodo = detector_in_volo(quota=50.0)
+    try:
+        msg = _rileva(nodo, 200, 100)
+        assert msg.point.z == 0.0, 'blob da 20000 px accettato come bersaglio'
+    finally:
+        nodo.destroy_node()
+
+
+def test_rilevatore_scarta_il_rumore_piccolo():
+    nodo = detector_in_volo(quota=50.0)
+    try:
+        msg = _rileva(nodo, 5, 5)
+        assert msg.point.z == 0.0
+    finally:
+        nodo.destroy_node()
+
+
+def test_senza_quota_il_rilevatore_non_giudica_la_taglia():
+    """Senza quota la taglia attesa non e calcolabile, e si accetta.
+
+    Scartare per ignoranza sarebbe peggio: al decollo e nei primi istanti la
+    quota non e ancora arrivata, e un rilevamento valido non va buttato solo
+    perche non lo si sa verificare.
+    """
+    nodo = detector_in_volo(quota=None)
+    try:
+        msg = _rileva(nodo, 200, 100)
+        assert msg.point.z > 0.0, 'scartato senza poter giudicare'
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_taglia_attesa_cala_col_quadrato_della_quota():
+    """Raddoppiando la quota il bersaglio deve apparire quattro volte piu piccolo."""
+    nodo = detector_in_volo(quota=50.0)
+    try:
+        a50 = nodo._area_attesa(640)
+        nodo.quota = 100.0
+        a100 = nodo._area_attesa(640)
+        assert abs(a50 / a100 - 4.0) < 0.01, 'la legge 1/h^2 non e rispettata'
+    finally:
+        nodo.destroy_node()
+
+
+def test_a_ritardo_zero_il_rilevamento_esce_subito():
+    """Il percorso normale non deve passare da nessuna coda."""
+    nodo = detector_in_volo(quota=50.0)
+    try:
+        assert nodo.ritardo_s == 0.0
+        _rileva(nodo, 26, 13)
+        assert len(nodo.target_pub.messaggi) == 1
+        assert not nodo.coda_ritardo
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_latenza_iniettata_trattiene_il_rilevamento():
+    """Con la latenza accesa il rilevamento esce dopo, non subito.
+
+    Serve a misurare quanto costa un ritardo che in simulazione non esiste e su
+    hardware vale 50-150 ms: a 20 m/s sono uno-tre metri di errore sistematico,
+    sempre nella stessa direzione.
+    """
+    nodo = detector_in_volo(quota=50.0)
+    try:
+        nodo.ritardo_s = 0.2
+        frame = immagine_con_rosso(26, 13)
+        nodo.on_image(nodo.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
+        assert not nodo.target_pub.messaggi, 'pubblicato senza attendere'
+        assert len(nodo.coda_ritardo) == 1
+
+        # Il tempo non si puo far avanzare: si riavvolge l'istante di scadenza,
+        # che equivale ad aspettare.
+        quando, msg = nodo.coda_ritardo[0]
+        nodo.coda_ritardo[0] = (quando - 1.0, msg)
+        nodo._svuota_coda()
+        assert len(nodo.target_pub.messaggi) == 1
+        assert not nodo.coda_ritardo
+    finally:
+        nodo.destroy_node()
+
+
+def sicurezza_in_volo(x=0.0, y=0.0, quota=50.0, carica=1.0):
+    """Nodo di sicurezza con il velivolo in volo operativo entro i limiti."""
+    nodo = SicurezzaNode()
+    nodo.posizione = (x, y)
+    nodo.quota = quota
+    nodo.carica = carica
+    nodo.modo_volo = 'GUIDED'
+    nodo.controlla()          # porta il nodo in quota operativa
+    return nodo
+
+
+def test_sicurezza_ferma_oltre_il_confine():
+    """Un bersaglio che fugge verso l'orizzonte non va inseguito all'infinito.
+
+    Senza questo limite il velivolo lo seguiva finche aveva corrente, ed e il
+    difetto che rendeva il progetto inadatto a volare davvero.
+    """
+    nodo = sicurezza_in_volo()
+    try:
+        nodo.controlla()
+        assert not nodo.bloccato
+
+        nodo.posizione = (nodo.raggio_max + 10.0, 0.0)
+        nodo.controlla()
+        assert nodo.bloccato
+        assert 'confine' in nodo.motivo
+    finally:
+        nodo.destroy_node()
+
+
+def test_sicurezza_ferma_oltre_il_tetto_di_quota():
+    nodo = sicurezza_in_volo()
+    try:
+        nodo.quota = nodo.quota_max + 1.0
+        nodo.controlla()
+        assert nodo.bloccato and 'tetto' in nodo.motivo
+    finally:
+        nodo.destroy_node()
+
+
+def test_sicurezza_ferma_con_la_batteria_scarica():
+    nodo = sicurezza_in_volo()
+    try:
+        nodo.carica = nodo.batteria_min - 0.05
+        nodo.controlla()
+        assert nodo.bloccato and 'batteria' in nodo.motivo
+    finally:
+        nodo.destroy_node()
+
+
+def test_carica_non_nota_non_e_carica_scarica():
+    """MAVROS riporta -1 quando la carica non si misura.
+
+    Confonderlo con lo zero fermerebbe ogni volo su un velivolo che non
+    riporta la percentuale, cioe trasformerebbe una rete di sicurezza in un
+    impedimento.
+    """
+    nodo = sicurezza_in_volo()
+    try:
+        from sensor_msgs.msg import BatteryState
+        nodo.on_batteria(BatteryState(percentage=-1.0))
+        assert nodo.carica is None
+        nodo.controlla()
+        assert not nodo.bloccato
+    finally:
+        nodo.destroy_node()
+
+
+def test_durante_il_decollo_la_quota_bassa_non_e_una_violazione():
+    """Salendo, il velivolo e sotto il minimo perche ci sta arrivando.
+
+    Difetto trovato in volo, non a banco: la prova precedente verificava la
+    quota a ZERO — a terra — e passava, mentre a 1 m in salita il nodo
+    comandava RTL e abortiva il decollo. Il minimo non significa «mai sotto
+    cinque metri» ma «non scendere sotto cinque metri mentre operi».
+    """
+    nodo = SicurezzaNode()
+    try:
+        nodo.posizione = (0.0, 0.0)
+        nodo.carica = 1.0
+        nodo.modo_volo = 'GUIDED'
+        for quota in (0.0, 0.5, 1.0, 3.0, 4.9):
+            nodo.quota = quota
+            nodo.controlla()
+            assert not nodo.bloccato, 'bloccato a %.1f m durante la salita' % quota
+    finally:
+        nodo.destroy_node()
+
+
+def test_scendere_sotto_il_minimo_dopo_esserci_stati_e_una_violazione():
+    """Raggiunta la quota operativa, scendere sotto il minimo va fermato."""
+    nodo = sicurezza_in_volo(quota=50.0)
+    try:
+        assert nodo.in_quota_operativa
+        nodo.quota = 2.0
+        nodo.controlla()
+        assert nodo.bloccato and 'minimo' in nodo.motivo
+    finally:
+        nodo.destroy_node()
+
+
+def test_una_discesa_comandata_non_e_una_violazione():
+    """Fuori da GUIDED la quota la comanda qualcun altro: RTL, LAND, il pilota.
+
+    Intervenire li significherebbe contrastare un atterraggio voluto.
+    """
+    nodo = sicurezza_in_volo(quota=50.0)
+    try:
+        nodo.modo_volo = 'LAND'
+        nodo.quota = 2.0
+        nodo.controlla()
+        assert not nodo.bloccato
+    finally:
+        nodo.destroy_node()
+
+
+def test_il_blocco_non_cade_da_solo():
+    """Rientrare nel confine non basta a riprendere l'inseguimento.
+
+    Se il blocco cadesse appena il velivolo torna dentro, la missione
+    riprenderebbe a inseguire e lo riporterebbe fuori: un ciclo che entra e
+    esce dal confine invece di fermarsi. Si sgancia solo con un reset
+    esplicito, che e una decisione di chi comanda.
+    """
+    nodo = sicurezza_in_volo()
+    try:
+        nodo.posizione = (nodo.raggio_max + 10.0, 0.0)
+        nodo.controlla()
+        assert nodo.bloccato
+
+        nodo.posizione = (0.0, 0.0)
+        nodo.controlla()
+        assert nodo.bloccato, 'il blocco e caduto da solo'
+
+        nodo.on_reset(Bool(data=True))
+        assert not nodo.bloccato
+    finally:
+        nodo.destroy_node()
+
+
 def mission_in_aggancio():
     nodo = MissionNode()
     posa = PoseStamped()
@@ -768,7 +1132,7 @@ def stima_bersaglio(x, y, vx, vy, valida=True):
 
 def rilevamento(visto):
     """Messaggio del rilevatore. La convenzione e l'area: z a zero, niente."""
-    return Point(x=0.1, y=0.1, z=120.0 if visto else 0.0)
+    return punto(x=0.1, y=0.1, z=120.0 if visto else 0.0)
 
 
 def test_riaggancio_non_scatta_sulla_predizione_del_filtro():
@@ -790,7 +1154,7 @@ def test_riaggancio_non_scatta_sulla_predizione_del_filtro():
         # Il tracker pubblica posizioni valide — sono predizioni, ma da fuori
         # non si distinguono — e nessun rilevamento le sostiene.
         for _ in range(20):
-            nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+            nodo.on_target(punto(x=0.1, y=0.1, z=120.0))
         assert nodo.fase == FaseMissione.RICERCA, (
             'riagganciato senza un solo rilevamento')
     finally:
@@ -806,11 +1170,11 @@ def test_riaggancio_scatta_sui_rilevamenti_veri():
 
         for _ in range(nodo.frame_conferma_riaggancio - 1):
             nodo.on_rilevamento(rilevamento(True))
-        nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        nodo.on_target(punto(x=0.1, y=0.1, z=120.0))
         assert nodo.fase == FaseMissione.RICERCA, 'un rilevamento in meno basta'
 
         nodo.on_rilevamento(rilevamento(True))
-        nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        nodo.on_target(punto(x=0.1, y=0.1, z=120.0))
         assert nodo.fase == FaseMissione.AGGANCIO
     finally:
         nodo.destroy_node()
@@ -826,7 +1190,7 @@ def test_i_rilevamenti_devono_essere_consecutivi():
         nodo.on_rilevamento(rilevamento(True))
         nodo.on_rilevamento(rilevamento(False))
         nodo.on_rilevamento(rilevamento(True))
-        nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+        nodo.on_target(punto(x=0.1, y=0.1, z=120.0))
         assert nodo.fase == FaseMissione.RICERCA
     finally:
         nodo.destroy_node()
@@ -849,9 +1213,29 @@ def test_rilevamenti_a_rilevamento_disattivato_non_si_accumulano():
 
         for _ in range(20):
             nodo.on_rilevamento(rilevamento(True))
-            nodo.on_target(Point(x=0.1, y=0.1, z=120.0))
+            nodo.on_target(punto(x=0.1, y=0.1, z=120.0))
         assert nodo.fase == FaseMissione.PATTUGLIAMENTO
         assert nodo.rilevamenti_consecutivi == 0
+    finally:
+        nodo.destroy_node()
+
+
+def test_bloccata_la_missione_congela_la_fase():
+    """Il registro non deve dire AGGANCIO mentre il velivolo rientra.
+
+    Verificato in volo: dopo il blocco la missione continuava a valutare le
+    transizioni, e il CSV registrava un inseguimento che non stava avvenendo.
+    Nessun comando usciva davvero, ma la prova mentiva a chi poi la analizza.
+    """
+    nodo = mission_in_aggancio()
+    try:
+        nodo.blocco_sicurezza = True
+        nodo.istante_ultimo_target = ora(nodo) - 10.0
+        nodo.istante_perdita = ora(nodo) - nodo.soglia_avvia_ricerca_s - 1.0
+        nodo.istante_ultima_posa = ora(nodo)
+        nodo.aggiorna_missione()
+        assert nodo.fase == FaseMissione.AGGANCIO, (
+            'la fase e cambiata mentre la missione era bloccata')
     finally:
         nodo.destroy_node()
 
@@ -950,7 +1334,7 @@ def test_mission_non_rinuncia_se_il_bersaglio_e_visibile():
     nodo = mission_in_aggancio()
     try:
         nodo.istante_perdita = ora(nodo) - 100.0
-        nodo.on_target(Point(x=0.1, y=0.1, z=300.0))
+        nodo.on_target(punto(x=0.1, y=0.1, z=300.0))
         assert nodo.istante_perdita is None
         assert nodo.fase == FaseMissione.AGGANCIO
     finally:

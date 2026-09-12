@@ -3,7 +3,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import PointStamped
 import numpy as np
 
 from drone_tracking.parametri import parametro  # type: ignore
@@ -22,11 +22,11 @@ class JammerNode(Node):
 
         # Subscriber: intercetta la posizione grezza e la corrompe
         self.sub = self.create_subscription(
-            Point, '/target/position', self.corrupt_signal, 10)
+            PointStamped, '/target/position', self.corrupt_signal, 10)
 
         # Publisher: posizione corrotta (quella che arriva al tracker sotto jamming)
         self.corrupted_pub = self.create_publisher(
-            Point, '/target/jammed_position', 10)
+            PointStamped, '/target/jammed_position', 10)
 
         # Stato interno
         self.jamming_active = False
@@ -88,7 +88,7 @@ class JammerNode(Node):
         noise_msg.data = 0.8 if self.jamming_active else 0.0
         self.noise_pub.publish(noise_msg)
 
-    def corrupt_signal(self, msg: Point):
+    def corrupt_signal(self, msg: PointStamped):
         # Limitiamo la frequenza di pubblicazione per evitare di sovraccaricare il tracker
         adesso = self.get_clock().now().nanoseconds / 1e9
         
@@ -97,25 +97,28 @@ class JammerNode(Node):
         
         self.ultimo_publish = adesso
         
-        out = Point()
-        segnale_valido = not (msg.z == 0.0)
+        out = PointStamped()
+        # Disturbare il canale cambia il valore, non l'istante in cui la scena
+        # e stata guardata: l'header passa intatto.
+        out.header = msg.header
+        segnale_valido = not (msg.point.z == 0.0)
 
         if self.jamming_active and segnale_valido:
             noise_x = np.random.normal(0, self.deviazione_rumore) # rumore gaussiano con deviazione standard di 0.3
             noise_y = np.random.normal(0, self.deviazione_rumore)
             
             if np.random.random() < self.probabilita_perdita_segnale:
-                out.x = 0.0
-                out.y = 0.0
-                out.z = 0.0
+                out.point.x = 0.0
+                out.point.y = 0.0
+                out.point.z = 0.0
             else:
-                out.x = float(np.clip(msg.x + noise_x, -1.0, 1.0))
-                out.y = float(np.clip(msg.y + noise_y, -1.0, 1.0))
-                out.z = msg.z
+                out.point.x = float(np.clip(msg.point.x + noise_x, -1.0, 1.0))
+                out.point.y = float(np.clip(msg.point.y + noise_y, -1.0, 1.0))
+                out.point.z = msg.point.z
         else:
-            out.x = msg.x
-            out.y = msg.y
-            out.z = msg.z
+            out.point.x = msg.point.x
+            out.point.y = msg.point.y
+            out.point.z = msg.point.z
         
         self.corrupted_pub.publish(out)
 

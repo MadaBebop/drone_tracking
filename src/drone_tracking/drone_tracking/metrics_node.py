@@ -19,7 +19,7 @@ from datetime import datetime
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Point, PoseStamped, TwistStamped
+from geometry_msgs.msg import PointStamped, PoseStamped, TwistStamped
 from std_msgs.msg import Bool, Float32, Float64, String
 
 # Binding nativi di gz-transport: costano una frazione di millisecondo contro
@@ -75,18 +75,20 @@ class MetricsNode(Node):
         self.create_subscription(String, '/mission/stato', self.on_stato, 10)
         self.create_subscription(PoseStamped, '/mavros/local_position/pose',
                                  self.on_posa, qos_mavros)
-        self.create_subscription(Point, '/target/position', self.on_detection, 10)
+        self.create_subscription(PointStamped, '/target/position',
+                                 self.on_detection, 10)
         # Ingresso vero del filtro, cioe il rilevamento dopo il jammer: e il
         # termine di paragone corretto per misurarne il guadagno.
-        self.create_subscription(Point, '/target/jammed_position',
+        self.create_subscription(PointStamped, '/target/jammed_position',
                                  self.on_disturbata, 10)
         # Livello di rumore dichiarato sul datalink: governa R nel tracker.
         self.create_subscription(Float32, '/rf/noise_level', self.on_rumore, 10)
         self.create_subscription(Float32, '/target/nis', self.on_nis, 10)
-        self.create_subscription(Point, '/target/tracked_position', self.on_tracked, 10)
+        self.create_subscription(PointStamped, '/target/tracked_position',
+                                 self.on_tracked, 10)
         # Velocita stimata dal filtro, in coordinate immagine al secondo. Da
         # confrontare con il moto vero del bersaglio per giudicarne la qualita.
-        self.create_subscription(Point, '/target/tracked_velocity',
+        self.create_subscription(PointStamped, '/target/tracked_velocity',
                                  self.on_tracked_vel, 10)
         # Velocita del velivolo. Registrarla accanto alla posizione vera
         # permette di stabilire in che frame sia espressa invece di assumerlo.
@@ -113,6 +115,7 @@ class MetricsNode(Node):
         self.det_disturbata = None
         self.rumore_rf = None
         self.nis = None
+        self.nis_fresco = False
         self.trk = None
         self.trk_vel = None
         self.jam = False
@@ -270,25 +273,26 @@ class MetricsNode(Node):
     def on_gimbal_pitch(self, msg: Float64):
         self.gimbal_pitch = msg.data
 
-    def on_detection(self, msg: Point):
-        self.det = (msg.x, msg.y, msg.z)
+    def on_detection(self, msg: PointStamped):
+        self.det = (msg.point.x, msg.point.y, msg.point.z)
 
-    def on_disturbata(self, msg: Point):
-        self.det_disturbata = (msg.x, msg.y, msg.z)
+    def on_disturbata(self, msg: PointStamped):
+        self.det_disturbata = (msg.point.x, msg.point.y, msg.point.z)
 
     def on_rumore(self, msg):
         self.rumore_rf = msg.data
 
     def on_nis(self, msg):
         self.nis = msg.data
+        self.nis_fresco = True
         self.n_det += 1
 
-    def on_tracked(self, msg: Point):
-        self.trk = (msg.x, msg.y, msg.z)
+    def on_tracked(self, msg: PointStamped):
+        self.trk = (msg.point.x, msg.point.y, msg.point.z)
         self.n_trk += 1
 
-    def on_tracked_vel(self, msg: Point):
-        self.trk_vel = (msg.x, msg.y) if msg.z != 0.0 else None
+    def on_tracked_vel(self, msg: PointStamped):
+        self.trk_vel = (msg.point.x, msg.point.y) if msg.point.z != 0.0 else None
 
     def on_jam(self, msg: Bool):
         self.jam = bool(msg.data)
@@ -349,7 +353,11 @@ class MetricsNode(Node):
         riga += [1 if (d and d[2] != 0.0) else 0]
         riga += ([round(d[0], 4), round(d[1], 4)] if d else ['', ''])
         riga += [round(self.rumore_rf, 4) if self.rumore_rf is not None else '']
-        riga += [round(self.nis, 3) if self.nis is not None else '']
+        # Solo se e arrivato dall ultima riga: un campione ripetuto e un
+        # campione inventato, e qui le medie si fanno proprio su questa colonna.
+        riga += [round(self.nis, 3)
+                 if (self.nis is not None and self.nis_fresco) else '']
+        self.nis_fresco = False
         riga += [trk_valido] + terna(self.trk) + [round(self.n_trk / dt, 1)]
         riga += ([round(v, 4) for v in self.trk_vel] if self.trk_vel
                  else ['', ''])

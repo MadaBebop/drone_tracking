@@ -42,6 +42,15 @@ services:
       - ./src/drone_tracking/drone_tracking:/ws/src/drone_tracking/drone_tracking:ro
       - ./src/drone_tracking/launch:/ws/src/drone_tracking/launch:ro
       - ./src/drone_tracking/test:/ws/src/drone_tracking/test:ro
+      # Manifesto e punti d'ingresso. Senza questi due, un nodo NUOVO arriva nel
+      # container come file ma non come eseguibile: il launch lo cerca in
+      # libexec e non lo trova, e nessuna ricostruzione lo crea perché setup.py
+      # resta quello dell'immagine.
+      - ./src/drone_tracking/setup.py:/ws/src/drone_tracking/setup.py:ro
+      - ./src/drone_tracking/package.xml:/ws/src/drone_tracking/package.xml:ro
+      # Parametri dell'autopilota, letti dal SITL all'avvio: senza il montaggio
+      # vivono solo nell'immagine, e provarne uno diverso non avrebbe effetto.
+      - ./docker/sitl-defaults.parm:/opt/sitl-defaults.parm:ro
       # Frame salvati da snapshot.sh: ispezionabili dall'host senza GUI.
       - ./snapshots:/ws/snapshots:rw
       # CSV scritti da metrics_node: una prova per file, analizzabili dall'host.

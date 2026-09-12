@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -40,7 +40,7 @@ class MissionNode(Node):
         
         # Subscriber: bersaglio rilevato
         self.target_sub = self.create_subscription(
-            Point, '/target/tracked_position',
+            PointStamped, '/target/tracked_position',
             self.on_target, 10)
 
         # Subscriber: rilevamenti veri, quelli che il tracker riceve in
@@ -48,13 +48,21 @@ class MissionNode(Node):
         # i rilevamenti puliti farebbe confermare un aggancio su
         # un'informazione che il filtro non ha mai avuto.
         self.create_subscription(
-            Point, '/target/jammed_position', self.on_rilevamento, 10)
+            PointStamped, '/target/jammed_position',
+            self.on_rilevamento, 10)
 
         # Subscriber: stima del bersaglio in metri, pubblicata dal controllo.
         # E cio che rende possibile cercare nella direzione giusta invece che
         # a spirale isotropa.
         self.create_subscription(
             Odometry, '/target/odometria', self.on_stima_bersaglio, 10)
+
+        # Limite operativo superato: si smette di proporre waypoint. Il
+        # velivolo e gia in rientro, e insistere lo riporterebbe fuori appena
+        # rimesso in GUIDED.
+        self.create_subscription(Bool, '/sicurezza/blocco',
+                                 self.on_blocco_sicurezza, 10)
+        self.blocco_sicurezza = False
 
         # Publisher: waypoint verso MAVROS2
         self.waypoint_pub = self.create_publisher(
@@ -172,7 +180,7 @@ class MissionNode(Node):
         self.soglia_avvia_ricerca_s = parametro(
             self, 'soglia_avvia_ricerca_s', 3.0)
 
-    def on_rilevamento(self, msg: Point):
+    def on_rilevamento(self, msg: PointStamped):
         """Rilevamenti consecutivi del bersaglio.
 
         La convenzione del rilevatore e l'area: z a zero significa che non ha
@@ -180,7 +188,7 @@ class MissionNode(Node):
         esattamente al centro dell'inquadratura ha x = y = 0 pur essendo
         perfettamente visibile.
         """
-        if msg.z != 0.0:
+        if msg.point.z != 0.0:
             self.rilevamenti_consecutivi += 1
         else:
             self.rilevamenti_consecutivi = 0
@@ -257,9 +265,9 @@ class MissionNode(Node):
             self.istante_perdita = None
             self.rilevamenti_consecutivi = 0
 
-    def on_target(self, msg: Point):
+    def on_target(self, msg: PointStamped):
         self.istante_ultimo_target = self.get_clock().now().nanoseconds / 1e9
-        target_visibile = (msg.x != 0.0 or msg.y != 0.0)
+        target_visibile = (msg.point.x != 0.0 or msg.point.y != 0.0)
         altitudine_ok = (self.posizione_attuale is not None
                         and self.posizione_attuale.z > 2.0)
         in_pattugliamento = self.fase == FaseMissione.PATTUGLIAMENTO
@@ -307,7 +315,15 @@ class MissionNode(Node):
         dz = self.posizione_attuale.z - target[2]
         return (dx**2 + dy**2 + dz**2) ** 0.5
 
+    def on_blocco_sicurezza(self, msg: Bool):
+        if msg.data and not self.blocco_sicurezza:
+            self.get_logger().error(
+                'Blocco di sicurezza: la missione smette di proporre waypoint')
+        self.blocco_sicurezza = msg.data
+
     def pubblica_waypoint(self, wp):
+        if self.blocco_sicurezza:
+            return
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
@@ -322,6 +338,15 @@ class MissionNode(Node):
 
         if self.fase == FaseMissione.ATTESA:
             stato_msg.data = FaseMissione.ATTESA.value
+            self.stato_pub.publish(stato_msg)
+            return
+
+        # Bloccata, la missione non decide piu nulla: la fase resta dov'era.
+        # Continuare a valutare le transizioni scriverebbe nel registro un
+        # AGGANCIO mentre il velivolo sta rientrando, cioe una prova che mente
+        # a chi la analizza.
+        if self.blocco_sicurezza:
+            stato_msg.data = self.fase.value
             self.stato_pub.publish(stato_msg)
             return
 

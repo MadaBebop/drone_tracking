@@ -3,7 +3,7 @@ import math
 from statistics import median
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point, PoseStamped, Twist
+from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Float64, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -28,14 +28,22 @@ class ControllerNode(Node):
             String, '/mission/stato',
             self.on_stato_missione, 10)
 
+        # Blocco di sicurezza: un limite operativo superato. Il velivolo e gia
+        # stato comandato fuori da GUIDED, ma continuare a pubblicare setpoint
+        # significherebbe spingere contro il rientro.
+        self.create_subscription(Bool, '/sicurezza/blocco',
+                                 self.on_blocco_sicurezza, 10)
+        self.blocco_sicurezza = False
+
         self.sub = self.create_subscription(
-            Point, '/target/tracked_position', self.on_tracked, 10)
+            PointStamped, '/target/tracked_position', self.on_tracked, 10)
 
         # Velocita del bersaglio stimata dal filtro, in coordinate immagine al
         # secondo. E gia la sua velocita propria: il filtro riceve il moto del
         # velivolo come ingresso noto.
         self.create_subscription(
-            Point, '/target/tracked_velocity', self.on_velocita_stimata, 10)
+            PointStamped, '/target/tracked_velocity',
+            self.on_velocita_stimata, 10)
 
         self.gps_sub = self.create_subscription(
             Bool, '/gps/jammed', self.on_gps_status, 10)
@@ -202,6 +210,12 @@ class ControllerNode(Node):
     def pubblica_velocita_continua(self):
         fase_ok = FaseMissione.AGGANCIO.value in self.fase_missione
         if not (self.in_volo and fase_ok):
+            return
+
+        if self.blocco_sicurezza:
+            self.cmd_corrente = Twist()
+            self.istante_perdita_vista = None
+            self.primo_aggancio = True
             return
 
         scaduti = self._ingressi_scaduti()
@@ -378,6 +392,12 @@ class ControllerNode(Node):
         cmd.linear.y = self.cmd_base_coasting[1] * fattore
         return cmd
 
+    def on_blocco_sicurezza(self, msg: Bool):
+        if msg.data and not self.blocco_sicurezza:
+            self.get_logger().error(
+                'Blocco di sicurezza: comando azzerato')
+        self.blocco_sicurezza = msg.data
+
     def on_stato_missione(self, msg: String):
         self.fase_missione = msg.data
         # Reset aggancio quando si esce da AGGANCIO
@@ -397,10 +417,10 @@ class ControllerNode(Node):
         self.roll = math.atan2(2.0 * (q.w * q.x + q.y * q.z),
                                1.0 - 2.0 * (q.x * q.x + q.y * q.y))
 
-    def on_velocita_stimata(self, msg: Point):
-        self.vel_stimata_x = msg.x
-        self.vel_stimata_y = msg.y
-        self.vel_stimata_valida = (msg.z != 0.0)
+    def on_velocita_stimata(self, msg: PointStamped):
+        self.vel_stimata_x = msg.point.x
+        self.vel_stimata_y = msg.point.y
+        self.vel_stimata_valida = (msg.point.z != 0.0)
 
     def on_gimbal_roll(self, msg: Float64):
         self.gimbal_roll = msg.data
@@ -415,10 +435,10 @@ class ControllerNode(Node):
             self.get_logger().info('GPS ripristinato')
         self.gps_jammed = msg.data
 
-    def on_tracked(self, msg: Point):
+    def on_tracked(self, msg: PointStamped):
         self.istante_tracked = self.get_clock().now().nanoseconds / 1e9
         cmd = Twist()
-        target_visible = (msg.x != 0.0 or msg.y != 0.0)
+        target_visible = (msg.point.x != 0.0 or msg.point.y != 0.0)
 
         if not target_visible:
             self._avvia_coasting()
@@ -428,7 +448,7 @@ class ControllerNode(Node):
         # affidabile. Si tratta come una perdita di vista invece di azzerare il
         # comando — e la situazione tipica di una fuga veloce, e azzerare
         # proprio li svuoterebbe il coasting del suo contenuto.
-        if abs(msg.x) > 1.2 or abs(msg.y) > 1.2:
+        if abs(msg.point.x) > 1.2 or abs(msg.point.y) > 1.2:
             self._avvia_coasting()
             return
 
@@ -445,8 +465,8 @@ class ControllerNode(Node):
         #    errore invece di toglierlo.
         roll_camera = self.roll + self.gimbal_roll
         pitch_camera = self.pitch + self.gimbal_pitch
-        alpha_x = math.atan(msg.x * self.tan_semi_fov_o) - roll_camera
-        alpha_y = math.atan(msg.y * self.tan_semi_fov_v) + pitch_camera
+        alpha_x = math.atan(msg.point.x * self.tan_semi_fov_o) - roll_camera
+        alpha_y = math.atan(msg.point.y * self.tan_semi_fov_v) + pitch_camera
         # Il clamp a 80° evita che la tangente esploda in un transitorio
         # anomalo: con la guardia FOV a 1.2 e l'assetto limitato a 25° da
         # ATC_ANGLE_MAX non ci si arriva, e il comando risultante verrebbe

@@ -96,6 +96,13 @@ def generate_launch_description():
         ),
         Node(
             package='drone_tracking',
+            executable='sicurezza_node',
+            name='sicurezza_node',
+            output='screen',
+            parameters=comune
+        ),
+        Node(
+            package='drone_tracking',
             executable='mission_node',
             name='mission_node',
             output='screen',

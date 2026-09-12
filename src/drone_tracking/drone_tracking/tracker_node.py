@@ -19,16 +19,22 @@ costante. Tre scelte che lo distinguono dal caso da manuale:
   verita a terra: e la sola via percorribile su un velivolo vero
 """
 import math
+from collections import namedtuple
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Point, PoseStamped, TwistStamped
+from builtin_interfaces.msg import Time as TempoMsg
+from geometry_msgs.msg import PointStamped, PoseStamped, TwistStamped
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32, Float64, String
 
 from drone_tracking.mission_node import FaseMissione  # type: ignore
 from drone_tracking.parametri import parametro  # type: ignore
+
+# Un rilevamento con l'istante a cui si riferisce. L'istante e la ragione
+# per cui esiste: il resto era gia nel messaggio.
+Misura = namedtuple('Misura', 'x y area istante')
 
 # Semicampo della telecamera, come in controller_node.
 TAN_O = 1.0      # orizzontale, 90 gradi
@@ -50,7 +56,7 @@ class TrackerNode(Node):
 
         self.create_subscription(Float32, '/rf/noise_level',
                                  self.on_noise_level, 10)
-        self.create_subscription(Point, '/target/jammed_position',
+        self.create_subscription(PointStamped, '/target/jammed_position',
                                  self.on_detection, 10)
         self.create_subscription(Bool, '/tracker/reset', self.on_reset, 10)
         self.create_subscription(String, '/mission/stato',
@@ -65,11 +71,13 @@ class TrackerNode(Node):
         self.create_subscription(Float64, '/mavros/global_position/rel_alt',
                                  self.on_quota, qos_mavros)
 
-        self.pub = self.create_publisher(Point, '/target/tracked_position', 10)
+        self.pub = self.create_publisher(
+            PointStamped, '/target/tracked_position', 10)
         # Velocita del bersaglio in coordinate immagine al secondo. Con
         # l'ingresso noto attivo e la sua velocita PROPRIA, non piu relativa al
         # velivolo. z vale 1 quando la stima e utilizzabile.
-        self.pub_vel = self.create_publisher(Point, '/target/tracked_velocity', 10)
+        self.pub_vel = self.create_publisher(
+            PointStamped, '/target/tracked_velocity', 10)
         # Innovazione normalizzata: vale 2 in media se Q e R sono coerenti.
         self.pub_nis = self.create_publisher(Float32, '/target/nis', 10)
 
@@ -137,6 +145,10 @@ class TrackerNode(Node):
         self.yaw = 0.0
         self.quota = None
         self.timeout_stato_s = parametro(self, 'timeout_stato_drone_s', 1.0)
+        # Tetto all'estrapolazione in avanti. Oltre, l'errore sulla
+        # velocita moltiplicato per il tempo supera il ritardo che si sta
+        # correggendo, e la cura fa piu danno del male.
+        self.eta_massima_s = parametro(self, 'eta_massima_misura_s', 0.3)
         self.ingresso_applicato = False
 
         self.get_logger().info('TrackerNode avviato — filtro Kalman attivo')
@@ -214,8 +226,15 @@ class TrackerNode(Node):
         return (laterale / (self.quota * TAN_O),
                 avanti / (self.quota * TAN_V))
 
-    def _calcola_dt(self):
-        adesso = self.get_clock().now().nanoseconds / 1e9
+    def _calcola_dt(self, adesso=None):
+        """Intervallo fra due misure, misurato sugli istanti che dichiarano.
+
+        Non sull'ora di arrivo: quella include il tempo di trasporto, che
+        varia, e attribuisce alla dinamica del bersaglio il ritardo della
+        catena.
+        """
+        if adesso is None:
+            adesso = self.get_clock().now().nanoseconds / 1e9
         if self.ultimo_istante is None:
             self.ultimo_istante = adesso
             return self.dt_nominale
@@ -224,17 +243,64 @@ class TrackerNode(Node):
         return float(min(max(dt, self.dt_min), self.dt_max))
 
     # ------------------------------------------------------------- uscite
-    def _pubblica_posizione(self, area):
-        self.pub.publish(Point(x=float(self.stato_stimato[0].item()),
-                               y=float(self.stato_stimato[1].item()),
-                               z=float(area)))
+    def _stamp(self, istante):
+        return TempoMsg(sec=int(istante),
+                        nanosec=int((istante - int(istante)) * 1e9))
 
-    def _pubblica_velocita(self, valida):
-        stima = Point()
+    def _eta(self, istante):
+        """Quanto e vecchia la misura, con un tetto.
+
+        Il tetto serve perche l'estrapolazione moltiplica l'errore sulla
+        velocita per il tempo: oltre una frazione di secondo si starebbe
+        inventando piu di quanto si corregge.
+        """
+        eta = self.get_clock().now().nanoseconds / 1e9 - istante
+        return float(min(max(eta, 0.0), self.eta_massima_s))
+
+    def _pubblica_posizione(self, area, istante=None):
+        """Pubblica dove il bersaglio e ADESSO, non dov'era quando l'ho visto.
+
+        Lo stato si riferisce all'istante della misura. Portarlo avanti
+        dell'eta della misura toglie il ritardo della catena di percezione,
+        che altrimenti entra nell'anello di controllo come sfasamento.
+        """
+        x = float(self.stato_stimato[0].item())
+        y = float(self.stato_stimato[1].item())
+        riferimento = self.get_clock().now().nanoseconds / 1e9
+        if istante is not None:
+            eta = self._eta(istante)
+            riferimento = istante + eta
+            x += float(self.stato_stimato[2].item()) * eta
+            y += float(self.stato_stimato[3].item()) * eta
+            # Anche il velivolo si e mosso nel frattempo, e il suo moto
+            # trasla l'inquadratura: e lo stesso termine noto della
+            # predizione, sullo stesso intervallo.
+            ingresso = self._ingresso_noto(eta)
+            if ingresso is not None:
+                x += ingresso[0]
+                y += ingresso[1]
+        msg = PointStamped()
+        msg.header.stamp = self._stamp(riferimento)
+        msg.point.x, msg.point.y, msg.point.z = x, y, float(area)
+        self.pub.publish(msg)
+
+    def _pubblica_vuoto(self, istante=None):
+        """Nessun bersaglio. Marcato comunque: dice quando si e guardato."""
+        msg = PointStamped()
+        msg.header.stamp = self._stamp(
+            istante if istante is not None
+            else self.get_clock().now().nanoseconds / 1e9)
+        self.pub.publish(msg)
+
+    def _pubblica_velocita(self, valida, istante=None):
+        stima = PointStamped()
+        stima.header.stamp = self._stamp(
+            istante if istante is not None
+            else self.get_clock().now().nanoseconds / 1e9)
         if valida:
-            stima.x = float(self.stato_stimato[2].item())
-            stima.y = float(self.stato_stimato[3].item())
-            stima.z = 1.0
+            stima.point.x = float(self.stato_stimato[2].item())
+            stima.point.y = float(self.stato_stimato[3].item())
+            stima.point.z = 1.0
         self.pub_vel.publish(stima)
 
     def _reset(self):
@@ -249,36 +315,53 @@ class TrackerNode(Node):
         self.ultimo_istante = None
         self._pubblica_velocita(False)
 
-    def _acquisisci(self, msg):
+    def _leggi(self, msg):
+        """Dal messaggio alla misura, con l'istante a cui si riferisce.
+
+        L'istante e quello dell'otturatore, propagato dal rilevatore
+        attraverso il jammer. Se manca — qualcuno pubblica senza marcatura —
+        si ripiega sull'ora d'arrivo, che e esattamente l'approssimazione che
+        questo nodo ha smesso di fare: meglio dichiararla che subirla.
+        """
+        istante = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+        if istante <= 0.0:
+            istante = self.get_clock().now().nanoseconds / 1e9
+            self.get_logger().warn(
+                'Rilevamento senza marcatura: uso l ora d arrivo',
+                throttle_duration_sec=10.0)
+        return Misura(msg.point.x, msg.point.y, msg.point.z, istante)
+
+    def _acquisisci(self, m):
         """Fa ripartire lo stato dalla misura. Non pubblica: lo fa il chiamante."""
-        self.stato_stimato = np.array([[msg.x], [msg.y], [0.0], [0.0]],
+        self.stato_stimato = np.array([[m.x], [m.y], [0.0], [0.0]],
                                       dtype=np.float32)
         self.incertezza_corrente = np.eye(4, dtype=np.float32)
         self.bersaglio_acquisito = True
         self.rifiuti_consecutivi = 0
         self.frame_senza_segnale = 0
-        self.ultima_area = msg.z
-        self._calcola_dt()
+        self.ultima_area = m.area
+        self._calcola_dt(m.istante)
 
     # ---------------------------------------------------------- ciclo del filtro
-    def on_detection(self, msg: Point):
-        segnale_presente = msg.z != 0.0
+    def on_detection(self, msg: PointStamped):
+        m = self._leggi(msg)
+        segnale_presente = m.area != 0.0
 
         if not self.bersaglio_acquisito:
             if segnale_presente:
-                self._acquisisci(msg)
+                self._acquisisci(m)
                 self.get_logger().info('Bersaglio acquisito')
                 # Pubblicare subito evita di perdere un messaggio a ogni
                 # riacquisizione, e sotto jamming sono continue. La velocita
                 # non e ancora stimata, e dirlo evita che il controllo usi uno
                 # zero come se fosse una misura.
-                self._pubblica_posizione(msg.z)
-                self._pubblica_velocita(False)
+                self._pubblica_posizione(m.area, m.istante)
+                self._pubblica_velocita(False, m.istante)
             else:
-                self.pub.publish(Point())
+                self._pubblica_vuoto(m.istante)
             return
 
-        dt = self._calcola_dt()
+        dt = self._calcola_dt(m.istante)
         self.evoluzione_stato[0, 2] = dt
         self.evoluzione_stato[1, 3] = dt
 
@@ -292,23 +375,23 @@ class TrackerNode(Node):
             self.evoluzione_stato @ self.incertezza_corrente
             @ self.evoluzione_stato.T + self._matrice_Q(dt))
 
-        esito = self._aggiorna(msg) if segnale_presente else ASSENTE
+        esito = self._aggiorna(m) if segnale_presente else ASSENTE
 
         if esito == USATA:
-            self.ultima_area = msg.z
+            self.ultima_area = m.area
             self.frame_senza_segnale = 0
-            self._pubblica_posizione(msg.z)
+            self._pubblica_posizione(m.area, m.istante)
             # Senza ingresso noto la velocita di stato e relativa al velivolo e
             # non propria del bersaglio: e una grandezza diversa, e chi la legge
             # non ha modo di accorgersene. Meglio non pubblicarla.
-            self._pubblica_velocita(self.ingresso_applicato)
+            self._pubblica_velocita(self.ingresso_applicato, m.istante)
             return
 
         if esito == RIACQUISITO:
             # Lo stato riparte dalla misura: la posizione e buona, la velocita
             # non ancora.
-            self._pubblica_posizione(msg.z)
-            self._pubblica_velocita(False)
+            self._pubblica_posizione(m.area, m.istante)
+            self._pubblica_velocita(False, m.istante)
             return
 
         # Nessuna misura utilizzabile: o non e arrivata, o non era plausibile.
@@ -316,7 +399,7 @@ class TrackerNode(Node):
         if self.frame_senza_segnale > self.soglia_perdita:
             self._reset()
             self.get_logger().warn('Bersaglio perso — reset tracker')
-            self.pub.publish(Point())
+            self._pubblica_vuoto(m.istante)
             return
 
         # La POSIZIONE predetta e utilizzabile e va pubblicata: e cio che
@@ -324,12 +407,12 @@ class TrackerNode(Node):
         # non arriva informazione nuova sul moto, e lo stato resta congelato
         # all'ultimo valore. Pubblicarlo come valido significa spacciare per
         # misure ripetute una sola misura ripetuta molte volte.
-        self._pubblica_posizione(self.ultima_area)
-        self._pubblica_velocita(False)
+        self._pubblica_posizione(self.ultima_area, m.istante)
+        self._pubblica_velocita(False, m.istante)
 
-    def _aggiorna(self, msg):
+    def _aggiorna(self, m):
         """Correzione con la misura. Torna USATA, RIFIUTATA o RIACQUISITO."""
-        misura = np.array([[msg.x], [msg.y]], dtype=np.float32)
+        misura = np.array([[m.x], [m.y]], dtype=np.float32)
         innovazione = misura - self.mappa_osservazione @ self.stato_stimato
         S = (self.mappa_osservazione @ self.incertezza_corrente
              @ self.mappa_osservazione.T + self.incertezza_sensore)
@@ -350,7 +433,7 @@ class TrackerNode(Node):
             self.get_logger().warn(
                 'Misure rifiutate {} volte di fila — riacquisisco'.format(
                     self.rifiuti_consecutivi))
-            self._acquisisci(msg)
+            self._acquisisci(m)
             return RIACQUISITO
 
         self.rifiuti_consecutivi = 0
