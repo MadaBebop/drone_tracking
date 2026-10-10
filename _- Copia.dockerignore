@@ -1,0 +1,14 @@
+# Artefatti di build locali: il container ricompila da zero.
+build/
+install/
+log/
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+.pytest_cache/
+
+# File di lavoro che non devono finire nell'immagine.
+**/*.save
+.git/
+.gitignore
+README.md

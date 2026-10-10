@@ -1,0 +1,11 @@
+log/
+install/
+build/
+.pytest_cache/
+__pycache__/
+*.pyc
+snapshots/
+metrics/
+
+# Relazione generata, non sorgente
+Drone_Tracking_Relazione.docx

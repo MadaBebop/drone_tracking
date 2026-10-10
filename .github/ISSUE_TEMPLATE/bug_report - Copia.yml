@@ -1,0 +1,81 @@
+name: Malfunzionamento
+description: Qualcosa non si comporta come descritto nel README
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Prima di aprire la segnalazione, due controlli che risolvono la maggior
+        parte dei casi:
+
+        - dopo un `git pull`, hai ricompilato con `colcon build --packages-select drone_tracking`?
+        - se usi l'installazione nativa, gli asset Gazebo sotto `ardupilot_gazebo/`
+          sono allineati a quelli in `sim/`? Vedi la nota sui symlink nel README.
+
+  - type: dropdown
+    id: ambiente
+    attributes:
+      label: Ambiente
+      description: I due si comportano diversamente, saperlo cambia la diagnosi.
+      options:
+        - Container Docker
+        - Installazione nativa su Ubuntu
+        - Entrambi
+    validations:
+      required: true
+
+  - type: textarea
+    id: descrizione
+    attributes:
+      label: Cosa accade
+      description: Comportamento osservato e comportamento atteso.
+      placeholder: |
+        Il drone aggancia il bersaglio ma dopo pochi secondi passa in RICERCA.
+        Mi aspetterei che mantenesse l'aggancio durante l'orbita.
+    validations:
+      required: true
+
+  - type: textarea
+    id: riproduzione
+    attributes:
+      label: Come riprodurlo
+      description: I comandi lanciati, in ordine.
+    validations:
+      required: true
+
+  - type: input
+    id: fase
+    attributes:
+      label: Fase della missione
+      description: Output di `ros2 topic echo /mission/stato --field data --once`
+      placeholder: "AGGANCIO"
+
+  - type: input
+    id: camera
+    attributes:
+      label: Frequenza della telecamera
+      description: >
+        Visibile nel cruscotto `monitor.sh`. Incide molto sulla qualità
+        dell'inseguimento, quindi è quasi sempre un dato rilevante.
+      placeholder: "10.9 Hz"
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: >
+        Le righe pertinenti dai nodi, da MAVProxy o da MAVROS. Se il drone non si
+        muove, includi le righe `Waypoint ... dist:` di `mission_node`.
+      render: text
+
+  - type: textarea
+    id: versioni
+    attributes:
+      label: Versioni
+      placeholder: |
+        ROS 2: Jazzy
+        Gazebo: Harmonic 8.x
+        ArduPilot: output di `param show` per la versione, o la riga FCU nei log MAVROS
+        Sistema: Ubuntu 24.04 su VMware / Docker Desktop 4.x su Windows
+    validations:
+      required: true

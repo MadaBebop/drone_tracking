@@ -111,7 +111,7 @@ Stack avviato. Lo startup completo richiede ~30 s (i pannelli partono scaglionat
   tmux kill-session -t drone  per fermare tutto
 
 Dal pannello 'shell':
-  takeoff.sh                                                    # arm + guided + decollo a 12 m
+  takeoff.sh                                                    # arm + guided + decollo a 50 m
   ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true"
 
 Poi passa al pannello 'monitor' per seguire la missione in tempo reale.

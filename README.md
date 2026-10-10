@@ -1907,7 +1907,7 @@ rimanda anche i messaggi da ROS 2 verso Gazebo.
 ```
 mode guided
 arm throttle
-takeoff 12
+takeoff 50
 ```
 
 I controlli di arming sono **attivi** (`ARMING_SKIPCHK 0`, caricato all'avvio
@@ -1999,11 +1999,13 @@ ros2 topic echo /mission/stato
 ```
 
 ```bash
-ros2 run rqt_plot rqt_plot /target/position/x /target/jammed_position/x /target/tracked_position/x
+ros2 run rqt_plot rqt_plot /target/position/point/x /target/jammed_position/point/x /target/tracked_position/point/x
 ```
 
 Quest'ultimo è il grafico più significativo del progetto: mostra il segnale
 pulito, quello corrotto dal jammer e la ricostruzione del Kalman sovrapposti.
+Il `point/` in mezzo al percorso non è un refuso: da quando la catena è marcata
+temporalmente i topic sono `PointStamped`, e il valore sta un livello più sotto.
 
 ---
 

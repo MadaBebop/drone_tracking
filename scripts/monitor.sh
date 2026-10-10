@@ -10,7 +10,11 @@
 set -e
 
 source /opt/ros/jazzy/setup.bash
+# Il workspace sta in /ws nel container e accanto allo script su un'installazione
+# nativa: si provano entrambi invece di assumere il primo.
 [ -f /ws/install/setup.bash ] && source /ws/install/setup.bash
+_ws="$(cd "$(dirname "$0")/.." && pwd)/install/setup.bash"
+[ -f "$_ws" ] && source "$_ws"
 
 exec python3 - "${1:-0.5}" <<'PY'
 import sys
@@ -22,7 +26,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from std_msgs.msg import Bool, String, Float32, Float64
-from geometry_msgs.msg import Point, PoseStamped, Twist
+from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from sensor_msgs.msg import Image
 
 REFRESH = float(sys.argv[1])
@@ -82,12 +86,14 @@ class Monitor(Node):
                                  lambda m: setattr(self, 'gnss_negato', m.data), 10)
         self.create_subscription(Float32, '/rf/noise_level',
                                  lambda m: setattr(self, 'noise', m.data), 10)
-        self.create_subscription(Point, '/target/position',
-                                 lambda m: setattr(self, 'raw', m), 10)
-        self.create_subscription(Point, '/target/jammed_position',
-                                 lambda m: setattr(self, 'jam', m), 10)
-        self.create_subscription(Point, '/target/tracked_position',
-                                 lambda m: setattr(self, 'trk', m), 10)
+        # Si tiene il solo punto: cosi _xy e la stampa restano quelli di
+        # prima, e l'header marcato non serve a questo cruscotto.
+        self.create_subscription(PointStamped, '/target/position',
+                                 lambda m: setattr(self, 'raw', m.point), 10)
+        self.create_subscription(PointStamped, '/target/jammed_position',
+                                 lambda m: setattr(self, 'jam', m.point), 10)
+        self.create_subscription(PointStamped, '/target/tracked_position',
+                                 lambda m: setattr(self, 'trk', m.point), 10)
         self.create_subscription(Twist, '/drone/cmd_vel',
                                  lambda m: setattr(self, 'cmd', m), 10)
         self.create_subscription(Image, '/drone/camera/image_raw',

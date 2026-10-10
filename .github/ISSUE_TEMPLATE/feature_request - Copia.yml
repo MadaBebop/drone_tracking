@@ -1,0 +1,47 @@
+name: Proposta di modifica
+description: Suggerire una funzionalità o un miglioramento
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Il README elenca già, nella sezione *Problemi noti*, diversi limiti
+        riconosciuti e le direzioni di soluzione non implementate. Vale la pena
+        controllare se la tua proposta è già descritta lì.
+
+  - type: textarea
+    id: problema
+    attributes:
+      label: Quale problema risolve
+      description: >
+        Descrivi la difficoltà concreta, non la soluzione. Se hai una misura che
+        la quantifica, è la parte più utile della segnalazione.
+      placeholder: |
+        Quando il bersaglio inverte la marcia il drone lo perde. Misurato: la
+        distanza mediana sale da 3 a 12 metri nei dieci secondi successivi.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposta
+    attributes:
+      label: Soluzione proposta
+      description: Come intervenire, e su quali file.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternative
+    attributes:
+      label: Alternative considerate
+      description: E perché le hai scartate.
+
+  - type: dropdown
+    id: contributo
+    attributes:
+      label: Vuoi implementarla tu?
+      options:
+        - "Sì, apro una pull request"
+        - "No, è solo una proposta"
+    validations:
+      required: true
