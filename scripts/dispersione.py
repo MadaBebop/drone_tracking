@@ -16,6 +16,12 @@ osservare dice se un confronto ha senso prima di spendere ore di macchina.
     python3 scripts/dispersione.py                  # tutti i gruppi _gN
     python3 scripts/dispersione.py 'metrics/*_g*.csv'
 
+Con DUE pattern confronta due configurazioni provate a blocchi, giro per giro
+invece che fra medie — l'analisi corretta quando le prove sono state alternate
+apposta per neutralizzare la deriva della macchina:
+
+    python3 scripts/dispersione.py 'metrics/*dec0_g*.csv' 'metrics/*deca_g*.csv'
+
 Il numero che conta e l'ultimo: la differenza minima distinguibile con n prove
 per configurazione. Se e piu grande dell'effetto che cerchi, la batteria non
 puo rispondere alla domanda, e lanciarla comunque produce un numero che sembra
@@ -158,7 +164,66 @@ def prove_necessarie(cv, effetto, limite=500):
     return None
 
 
+def appaiato(pattern_a, pattern_b):
+    """Confronto fra due configurazioni provate a blocchi, giro per giro.
+
+    Il disegno a blocchi — tutte le configurazioni dentro ogni giro, invece di
+    tutti i giri di una e poi dell'altra — esiste perche il carico della
+    macchina deriva nel corso di un'ora: in sequenza quella deriva si
+    sommerebbe a una sola configurazione e sarebbe indistinguibile dall'effetto
+    cercato. Misurato: nella batteria del 10/10 il secondo giro ha dato
+    inquadratura 45% contro 66-68 degli altri due, e la stessa caduta si vede
+    in TUTTE le configurazioni di quel giro.
+
+    Confrontare le medie dei gruppi butta via il blocco e ci rimette: la
+    differenza vera finisce sotto una dispersione che il disegno aveva gia
+    neutralizzato. Si confronta percio giro per giro, e si guarda la media
+    delle differenze.
+    """
+    file_a = sorted(glob.glob(pattern_a))
+    file_b = sorted(glob.glob(pattern_b))
+    if len(file_a) != len(file_b) or not file_a:
+        print('servono due gruppi con lo stesso numero di prove (%d e %d)'
+              % (len(file_a), len(file_b)))
+        return 2
+    ma = [misura_prova(f) for f in file_a]
+    mb = [misura_prova(f) for f in file_b]
+    n = len(file_a)
+    df = n - 1
+    t = T_975.get(df, 1.960)
+
+    print('A: %s   (%d prove)' % (pattern_a, n))
+    print('B: %s   (%d prove)' % (pattern_b, n))
+    print()
+    for nome, unita in INDICATORI:
+        coppie = [(x[nome], y[nome]) for x, y in zip(ma, mb)
+                  if x and y and valido(x[nome]) and valido(y[nome])]
+        if len(coppie) < 2:
+            continue
+        diff = [b - a for a, b in coppie]
+        base = mean([a for a, _ in coppie])
+        m, sd = mean(diff), stdev(diff)
+        meta = t * sd / math.sqrt(len(diff))
+        esito = 'DIVERSO DA ZERO' if abs(m) > meta else 'dentro il rumore'
+        print('%s  [%s]' % (nome, unita))
+        print('  per giro: %s' % '  '.join('%+.1f' % d for d in diff))
+        print('  medio %+.2f (%+.1f%% di %.1f)   intervallo 95%%: %+.2f .. %+.2f'
+              % (m, 100 * m / base if base else float('nan'), base,
+                 m - meta, m + meta))
+        print('  -> %s' % esito)
+        print()
+    print('L intervallo e una t di Student su %d differenze appaiate: stretto'
+          % n)
+    print('se la configurazione sposta sempre nello stesso verso, largo se')
+    print('l effetto cambia segno da un giro all altro — che e un risultato')
+    print('anch esso, perche una funzione che a volte aiuta e a volte no non')
+    print('e una funzione su cui contare.')
+    return 0
+
+
 def main(argv):
+    if len(argv) > 2:
+        return appaiato(argv[1], argv[2])
     pattern = argv[1] if len(argv) > 1 else 'metrics/*_g*.csv'
     gruppi = raduna(pattern)
     if not gruppi:

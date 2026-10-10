@@ -102,6 +102,29 @@ class TargetMoverNode(Node):
         self.durata_evasione_s = parametro(
             self, 'durata_evasione_s', 20.0)   # s  -> ~260 m di fuga
 
+        # --- Modo prefissato: il bersaglio non guarda il drone ---
+        # Misurato sulle prove gia raccolte: in due prove della stessa
+        # configurazione il bersaglio si trova a 44-357 m di distanza dopo
+        # sessanta secondi. Non e un difetto ma la conseguenza dell'anello
+        # chiuso — lui scappa dal drone, il drone insegue lui — in cui una
+        # differenza di scheduling di un millisecondo cresce di circa un
+        # fattore dieci ogni venticinque secondi. Passati trenta secondi due
+        # prove "identiche" non condividono piu lo stimolo.
+        #
+        # `reattivo` resta il default e mostra il sistema; `prefissato` lo
+        # rende misurabile, perche la traiettoria diventa funzione del solo
+        # tempo trascorso. Si sceglie a caldo, prima di avviare la missione:
+        #   ros2 param set /target_mover_node modo_bersaglio prefissato
+        self.modo = parametro(self, 'modo_bersaglio', 'reattivo', 'modo')
+        self.istante_prima_evasione_s = parametro(
+            self, 'istante_prima_evasione_s', 30.0)
+        # Periodo fra l'inizio di una fuga e quello della successiva: deve
+        # superare la durata della fuga, altrimenti non resta orbita in mezzo.
+        self.periodo_evasione_s = parametro(
+            self, 'periodo_evasione_s', 45.0)
+        # Origine dei tempi del profilo. Senza, non si saprebbe da dove contare.
+        self.istante_avvio_missione = None
+
         self.ultimo_istante = None
         self.proc_pendente  = None
 
@@ -158,10 +181,19 @@ class TargetMoverNode(Node):
             # partenza: condizioni iniziali identiche a ogni prova.
             self._riparti_da_capo()
         elif self.missione_in_attesa:
+            self.istante_avvio_missione = (
+                self.get_clock().now().nanoseconds / 1e9)
             self.get_logger().info(
                 'Missione avviata — il bersaglio parte da '
-                '({:.1f}, {:.1f})'.format(self.pos_x, self.pos_y))
+                '({:.1f}, {:.1f}), modo {}'.format(
+                    self.pos_x, self.pos_y, self.modo))
         self.missione_in_attesa = in_attesa
+
+        # Nel modo prefissato la fuga la governa l'orologio, non l'aggancio:
+        # guardare la fase della missione rimetterebbe il drone dentro l'anello
+        # che questo modo esiste per aprire.
+        if self.modo == 'prefissato':
+            return
 
         if FaseMissione.AGGANCIO.value in msg.data and self.fase == FaseBersaglio.PATTUGLIO:
             adesso = self.get_clock().now().nanoseconds / 1e9
@@ -181,6 +213,71 @@ class TargetMoverNode(Node):
         dt = adesso - self.ultimo_istante
         self.ultimo_istante = adesso
         return float(min(max(dt, 0.01), 0.5))
+
+    def _spazio_rampa(self, tau):
+        """Distanza percorsa in `tau` secondi di fuga, rampa compresa.
+
+        Integrale della stessa legge del modo reattivo — accelerazione
+        costante fino al regime, poi regime — ma in forma chiusa invece che
+        accumulata passo passo, cosi il risultato non dipende da come il timer
+        ha scandito il tempo.
+        """
+        if tau <= 0.0:
+            return 0.0
+        t_rampa = self.vel_evasione / self.accel_evasione
+        if tau <= t_rampa:
+            return 0.5 * self.accel_evasione * tau * tau
+        return (0.5 * self.vel_evasione * t_rampa
+                + self.vel_evasione * (tau - t_rampa))
+
+    def _posa_prefissata(self, t):
+        """Dove sta il bersaglio a `t` secondi dall'avvio. Funzione pura.
+
+        Nessun riferimento alla posizione del drone ne allo stato accumulato
+        del nodo: due esecuzioni con lo stesso `t` danno lo stesso punto. E la
+        proprieta che rende due prove confrontabili campione per campione
+        invece che fra medie di tre.
+        """
+        cx, cy = self.centro_iniziale
+        raggio, omega = self.raggio, self.velocita_angolare
+        primo = self.istante_prima_evasione_s
+        periodo = max(self.periodo_evasione_s, self.durata_evasione_s + 1.0)
+        fase, tempo, episodio = 0.0, 0.0, 0
+
+        while True:
+            inizio = primo + episodio * periodo
+            if t < inizio:
+                ang = fase + omega * (t - tempo)
+                return (cx + raggio * math.cos(ang),
+                        cy + raggio * math.sin(ang),
+                        FaseBersaglio.PATTUGLIO)
+
+            ang = fase + omega * (inizio - tempo)
+            px, py = cx + raggio * math.cos(ang), cy + raggio * math.sin(ang)
+
+            # Verso l'esterno nelle fughe pari, di ritorno in quelle dispari:
+            # il bersaglio resta in una regione limitata senza mai guardare
+            # dove sia il drone.
+            dx = px - self.centro_iniziale[0]
+            dy = py - self.centro_iniziale[1]
+            norma = math.hypot(dx, dy) or 1.0
+            verso = 1.0 if episodio % 2 == 0 else -1.0
+            ux, uy = verso * dx / norma, verso * dy / norma
+
+            if t < inizio + self.durata_evasione_s:
+                spazio = self._spazio_rampa(t - inizio)
+                return (px + ux * spazio, py + uy * spazio,
+                        FaseBersaglio.EVASIONE)
+
+            spazio = self._spazio_rampa(self.durata_evasione_s)
+            px, py = px + ux * spazio, py + uy * spazio
+            # Stesso raccordo del modo reattivo: il centro va dietro la
+            # direzione di fuga, cosi l'orbita riprende senza strappi.
+            fase = math.atan2(uy, ux)
+            cx = px - raggio * math.cos(fase)
+            cy = py - raggio * math.sin(fase)
+            tempo = inizio + self.durata_evasione_s
+            episodio += 1
 
     def avvia_evasione(self):
         self.fase = FaseBersaglio.EVASIONE
@@ -203,6 +300,20 @@ class TargetMoverNode(Node):
         # Missione non ancora avviata: il bersaglio sta dove e, ma la posa va
         # comunque comandata, altrimenti la fisica di Gazebo se ne impossessa.
         if self.missione_in_attesa:
+            self._invia_posa(self.pos_x, self.pos_y, self.quota_modello)
+            return
+
+        if self.modo == 'prefissato':
+            if self.istante_avvio_missione is None:
+                self.istante_avvio_missione = (
+                    self.get_clock().now().nanoseconds / 1e9)
+            trascorso = (self.get_clock().now().nanoseconds / 1e9
+                         - self.istante_avvio_missione)
+            self.pos_x, self.pos_y, fase = self._posa_prefissata(trascorso)
+            if fase != self.fase:
+                self.fase = fase
+                self.get_logger().info(
+                    '{} a {:.0f} s dall avvio'.format(fase.value, trascorso))
             self._invia_posa(self.pos_x, self.pos_y, self.quota_modello)
             return
 

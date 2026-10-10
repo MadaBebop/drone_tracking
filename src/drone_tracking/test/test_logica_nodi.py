@@ -26,6 +26,8 @@ from drone_tracking.gimbal_node import GimbalNode
 from drone_tracking.gnss_denial_node import MODI, GnssDenialNode
 from drone_tracking.mission_node import FaseMissione, MissionNode
 from drone_tracking.sicurezza_node import SicurezzaNode
+from drone_tracking.target_mover_node import (  # type: ignore
+    FaseBersaglio, TargetMoverNode)
 from drone_tracking.tracker_node import TrackerNode
 
 
@@ -1339,3 +1341,147 @@ def test_mission_non_rinuncia_se_il_bersaglio_e_visibile():
         assert nodo.fase == FaseMissione.AGGANCIO
     finally:
         nodo.destroy_node()
+
+
+# --------------------------------------------------------------------------
+# Bersaglio a traiettoria prefissata
+#
+# Serve a misurare, non a dimostrare. Nel modo reattivo il bersaglio scappa dal
+# drone e il drone insegue il bersaglio: un anello chiuso in cui una differenza
+# di scheduling di un millisecondo cresce di circa un fattore dieci ogni
+# venticinque secondi. Misurato sulle prove raccolte, dopo sessanta secondi due
+# prove della stessa configurazione hanno il bersaglio a 44-357 m di distanza,
+# quindi non condividono piu lo stimolo e confrontarle significa confrontare
+# esperimenti diversi.
+# --------------------------------------------------------------------------
+
+def bersaglio_prefissato():
+    nodo = TargetMoverNode()
+    nodo.modo = 'prefissato'
+    return nodo
+
+
+def test_la_traiettoria_prefissata_non_dipende_dal_drone():
+    """Lo stimolo deve essere lo stesso qualunque cosa faccia l inseguitore.
+
+    E la proprieta per cui esiste questo modo: senza, due prove della stessa
+    configurazione non sono due prove della stessa cosa.
+    """
+    nodo = bersaglio_prefissato()
+    try:
+        nodo.drone_x, nodo.drone_y = 0.0, 0.0
+        vicino = [nodo._posa_prefissata(t)[:2] for t in (10.0, 35.0, 60.0, 100.0)]
+        nodo.drone_x, nodo.drone_y = 900.0, -400.0
+        lontano = [nodo._posa_prefissata(t)[:2] for t in (10.0, 35.0, 60.0, 100.0)]
+        assert vicino == lontano, 'la traiettoria guarda ancora il drone'
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_traiettoria_prefissata_e_una_funzione_del_tempo():
+    """Stesso istante, stesso punto: nessuno stato accumulato."""
+    nodo = bersaglio_prefissato()
+    try:
+        primo = nodo._posa_prefissata(123.4)
+        for t in (0.0, 50.0, 300.0, 7.0):      # la rimescola
+            nodo._posa_prefissata(t)
+        assert nodo._posa_prefissata(123.4) == primo
+    finally:
+        nodo.destroy_node()
+
+
+def test_il_bersaglio_prefissato_resta_nella_zona():
+    """Le fughe si alternano fra andata e ritorno, quindi non se ne va.
+
+    Senza l alternanza il bersaglio accumulerebbe 260 m a ogni fuga e uscirebbe
+    sia dal confine di sicurezza sia dallo scenario, rendendo la seconda meta
+    di ogni prova priva di contenuto.
+    """
+    nodo = bersaglio_prefissato()
+    try:
+        cx, cy = nodo.centro_iniziale
+        distanze = [math.hypot(x - cx, y - cy)
+                    for x, y, _ in (nodo._posa_prefissata(t / 2.0)
+                                    for t in range(800))]
+        assert max(distanze) < 400.0, 'si allontana: max %.0f m' % max(distanze)
+    finally:
+        nodo.destroy_node()
+
+
+def test_il_bersaglio_prefissato_non_fa_salti():
+    """Fra due campioni a 10 Hz non puo percorrere piu della sua velocita.
+
+    Un salto sarebbe letto dal rilevatore come un movimento impossibile e
+    scartato dal gating, falsando la prova che questo modo deve rendere pulita.
+    """
+    nodo = bersaglio_prefissato()
+    try:
+        prec, massimo = None, 0.0
+        for i in range(4000):
+            x, y, _ = nodo._posa_prefissata(i * 0.1)
+            if prec is not None:
+                massimo = max(massimo, math.hypot(x - prec[0], y - prec[1]) / 0.1)
+            prec = (x, y)
+        assert massimo <= nodo.vel_evasione * 1.05, '%.1f m/s' % massimo
+    finally:
+        nodo.destroy_node()
+
+
+def test_nel_modo_prefissato_l_aggancio_non_scatena_la_fuga():
+    """La fuga la governa l orologio: guardare la missione riaprirebbe l anello."""
+    nodo = bersaglio_prefissato()
+    try:
+        nodo.istante_aggancio = ora(nodo) - 100.0
+        nodo.on_stato_missione(String(data=FaseMissione.AGGANCIO.value))
+        assert nodo.fase == FaseBersaglio.PATTUGLIO
+    finally:
+        nodo.destroy_node()
+
+
+def test_ogni_parametro_aggiorna_l_attributo_che_il_nodo_legge():
+    """`parametro()` scrive sull attributo che PORTA IL NOME DEL PARAMETRO.
+
+    Se il valore di ritorno viene assegnato a un attributo con un altro nome,
+    l aggiornamento a caldo finisce su un attributo che nessuno legge: il
+    comando `ros2 param set` riesce, `ros2 param get` conferma, e il nodo
+    continua col valore di partenza. E costato un volo intero, e a occhio la
+    riga sbagliata e indistinguibile da quella giusta.
+
+    Il quarto argomento dichiara il nome dell attributo e risolve il caso.
+    Questa prova e statica: legge i sorgenti invece di eseguirli, perche il
+    difetto non si manifesta finche qualcuno non cambia quel parametro a caldo.
+    """
+    import ast
+    import glob
+    import os
+
+    radice = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'drone_tracking')
+    disallineati = []
+    for percorso in glob.glob(os.path.join(radice, '*.py')):
+        albero = ast.parse(open(percorso, encoding='utf-8').read())
+        for nodo_ast in ast.walk(albero):
+            if not isinstance(nodo_ast, ast.Assign):
+                continue
+            valore = nodo_ast.value
+            if not (isinstance(valore, ast.Call)
+                    and isinstance(valore.func, ast.Name)
+                    and valore.func.id == 'parametro'):
+                continue
+            if len(valore.args) >= 4:       # attributo dichiarato: a posto
+                continue
+            bersaglio = nodo_ast.targets[0]
+            if not isinstance(bersaglio, ast.Attribute):
+                continue
+            nome_param = valore.args[1]
+            if not isinstance(nome_param, ast.Constant):
+                continue
+            if bersaglio.attr != nome_param.value:
+                disallineati.append('%s:%d  self.%s <- %s'
+                                    % (os.path.basename(percorso),
+                                       nodo_ast.lineno, bersaglio.attr,
+                                       nome_param.value))
+
+    assert not disallineati, (
+        'parametri che non aggiornano l attributo letto dal nodo:\n  '
+        + '\n  '.join(disallineati))

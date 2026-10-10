@@ -127,7 +127,8 @@ class TrackerNode(Node):
         # dove sia il bersaglio. Dopo qualche rifiuto di fila la spiegazione
         # piu probabile non e che le misure siano sbagliate ma che lo sia lo
         # stato: si riparte dalla misura.
-        self.max_rifiuti = parametro(self, 'max_rifiuti_consecutivi', 5)
+        self.max_rifiuti = parametro(
+            self, 'max_rifiuti_consecutivi', 5, 'max_rifiuti')
         self.rifiuti_consecutivi = 0
 
         # Quanti fotogrammi senza segnale tollerare continuando a pubblicare la
@@ -144,11 +145,13 @@ class TrackerNode(Node):
         self.istante_vel_drone = None
         self.yaw = 0.0
         self.quota = None
-        self.timeout_stato_s = parametro(self, 'timeout_stato_drone_s', 1.0)
+        self.timeout_stato_s = parametro(
+            self, 'timeout_stato_drone_s', 1.0, 'timeout_stato_s')
         # Tetto all'estrapolazione in avanti. Oltre, l'errore sulla
         # velocita moltiplicato per il tempo supera il ritardo che si sta
         # correggendo, e la cura fa piu danno del male.
-        self.eta_massima_s = parametro(self, 'eta_massima_misura_s', 0.3)
+        self.eta_massima_s = parametro(
+            self, 'eta_massima_misura_s', 0.3, 'eta_massima_s')
         self.ingresso_applicato = False
 
         self.get_logger().info('TrackerNode avviato — filtro Kalman attivo')
