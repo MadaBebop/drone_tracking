@@ -95,7 +95,8 @@ class MetricsNode(Node):
         self.create_subscription(TwistStamped,
                                  '/mavros/local_position/velocity_local',
                                  self.on_velocita_drone, qos_mavros)
-        self.create_subscription(Bool, '/gps/jammed', self.on_jam, 10)
+        self.create_subscription(Bool, '/percezione/disturbata',
+                                 self.on_jam, 10)
         # Si registra il COMANDO al giunto e non il suo angolo effettivo: e il
         # comando a dire cosa il nodo ha chiesto, e un segno sbagliato si
         # vedrebbe qui accanto alla colonna dell'assetto.

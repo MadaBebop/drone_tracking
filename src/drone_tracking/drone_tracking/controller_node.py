@@ -45,8 +45,10 @@ class ControllerNode(Node):
             PointStamped, '/target/tracked_velocity',
             self.on_velocita_stimata, 10)
 
-        self.gps_sub = self.create_subscription(
-            Bool, '/gps/jammed', self.on_gps_status, 10)
+        # Disturbo sul canale di percezione, non sul GPS: il nome di prima
+        # (/gps/jammed) prometteva una cosa diversa da quella che fa.
+        self.disturbo_sub = self.create_subscription(
+            Bool, '/percezione/disturbata', self.on_percezione_disturbata, 10)
 
         # Angoli comandati al gimbal: dicono quanta parte dell'assetto e gia
         # compensata meccanicamente, cosi la compensazione analitica si occupa
@@ -74,7 +76,7 @@ class ControllerNode(Node):
         self.stima_pub = self.create_publisher(
             Odometry, '/target/odometria', 10)
 
-        self.gps_jammed     = False
+        self.percezione_disturbata = False
         self.altitudine     = 0.0
         self.in_volo        = False
         self.fase_missione  = FaseMissione.ATTESA.value
@@ -428,12 +430,12 @@ class ControllerNode(Node):
     def on_gimbal_pitch(self, msg: Float64):
         self.gimbal_pitch = msg.data
 
-    def on_gps_status(self, msg: Bool):
-        if msg.data and not self.gps_jammed:
-            self.get_logger().warn('GPS perso — modalità visione attiva')
-        elif not msg.data and self.gps_jammed:
-            self.get_logger().info('GPS ripristinato')
-        self.gps_jammed = msg.data
+    def on_percezione_disturbata(self, msg: Bool):
+        if msg.data and not self.percezione_disturbata:
+            self.get_logger().warn('Rilevamento disturbato')
+        elif not msg.data and self.percezione_disturbata:
+            self.get_logger().info('Rilevamento pulito')
+        self.percezione_disturbata = msg.data
 
     def on_tracked(self, msg: PointStamped):
         self.istante_tracked = self.get_clock().now().nanoseconds / 1e9
@@ -539,7 +541,7 @@ class ControllerNode(Node):
         self.cmd_corrente = cmd
         self.cmd_pub.publish(cmd)
 
-        mode = 'GPS+VISIONE' if not self.gps_jammed else 'SOLO VISIONE'
+        mode = 'PULITO' if not self.percezione_disturbata else 'DISTURBATO'
 
     def on_altitudine(self, msg):
         self.istante_quota = self.get_clock().now().nanoseconds / 1e9

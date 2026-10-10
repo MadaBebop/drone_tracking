@@ -12,9 +12,10 @@ class JammerNode(Node):
     def __init__(self):
         super().__init__('jammer_node')
 
-        # Publisher: stato del jamming GPS
-        self.gps_jammed_pub = self.create_publisher(
-            Bool, '/gps/jammed', 10)
+        # Publisher: stato del disturbo sul canale di PERCEZIONE. Non e il
+        # GPS: quello lo attacca gnss_denial_node, su /gps/denial_active.
+        self.disturbo_pub = self.create_publisher(
+            Bool, '/percezione/disturbata', 10)
 
         # Publisher: intensità del rumore sul datalink (0.0 - 1.0)
         self.noise_pub = self.create_publisher(
@@ -45,6 +46,17 @@ class JammerNode(Node):
         # deviazione standard del rumore gaussiano, in coordinate normalizzate
         self.deviazione_rumore = parametro(self, 'deviazione_rumore', 0.3)
 
+        # --- Falso aggancio: il guasto polarizzato ---
+        # Probabilita che una finestra di disturbo, invece di sporcare la
+        # misura, la sposti su un BERSAGLIO FALSO e ce la tenga. Zero disattiva
+        # il modo e lascia il comportamento precedente.
+        self.probabilita_falso_aggancio = parametro(
+            self, 'probabilita_falso_aggancio', 0.0)
+        self.durata_falso_aggancio_s = parametro(
+            self, 'durata_falso_aggancio_s', 3.0)
+        self.falso_fino_a = 0.0
+        self.falso_posizione = None
+
         # Seme del generatore pseudocasuale. Senza, ogni esecuzione vedeva una
         # sequenza di disturbo diversa: due prove della stessa configurazione
         # davano risultati che non si potevano confrontare, perché a cambiare
@@ -74,19 +86,49 @@ class JammerNode(Node):
         self.jamming_active = phase < self.jam_on_duration
 
         if self.jamming_active and not was_jamming:
-            self.get_logger().warn('JAMMING ATTIVO — GPS e datalink disturbati')
+            self.get_logger().warn('DISTURBO ATTIVO — rilevamento del bersaglio corrotto')
+            self._forse_falso_aggancio()
         elif not self.jamming_active and was_jamming:
-            self.get_logger().info('JAMMING DISATTIVO — segnali ripristinati')
+            self.get_logger().info('DISTURBO CESSATO — rilevamento pulito')
 
         # Pubblica stato GPS
         gps_msg = Bool()
         gps_msg.data = self.jamming_active
-        self.gps_jammed_pub.publish(gps_msg)
+        self.disturbo_pub.publish(gps_msg)
 
         # Pubblica livello rumore RF
         noise_msg = Float32()
         noise_msg.data = 0.8 if self.jamming_active else 0.0
         self.noise_pub.publish(noise_msg)
+
+    def _forse_falso_aggancio(self):
+        """All inizio di una finestra di disturbo, decide se inventare un bersaglio.
+
+        La posizione del falso resta FERMA per tutta la durata: e cio che lo
+        distingue dal rumore. Un oggetto fisso nella scena non si sposta da un
+        fotogramma all altro, e il filtro lo vede come un bersaglio
+        perfettamente tracciabile che semplicemente non e il suo.
+        """
+        if self.probabilita_falso_aggancio <= 0.0:
+            return
+        if np.random.random() >= self.probabilita_falso_aggancio:
+            return
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        self.falso_fino_a = adesso + self.durata_falso_aggancio_s
+        self.falso_posizione = (float(np.random.uniform(-0.8, 0.8)),
+                                float(np.random.uniform(-0.8, 0.8)))
+        self.get_logger().warn(
+            'FALSO AGGANCIO a ({:.2f}, {:.2f}) per {:.0f} s'.format(
+                self.falso_posizione[0], self.falso_posizione[1],
+                self.durata_falso_aggancio_s))
+
+    def _falso_attivo(self):
+        if self.falso_posizione is None:
+            return False
+        if self.get_clock().now().nanoseconds / 1e9 >= self.falso_fino_a:
+            self.falso_posizione = None
+            return False
+        return True
 
     def corrupt_signal(self, msg: PointStamped):
         # Limitiamo la frequenza di pubblicazione per evitare di sovraccaricare il tracker
@@ -102,6 +144,16 @@ class JammerNode(Node):
         # e stata guardata: l'header passa intatto.
         out.header = msg.header
         segnale_valido = not (msg.point.z == 0.0)
+
+        # Il falso aggancio ha la precedenza sul rumore: e un guasto diverso,
+        # non una sua versione piu forte. L area resta quella vera, perche un
+        # oggetto della taglia sbagliata lo scarterebbe gia il rilevatore.
+        if self._falso_attivo() and segnale_valido:
+            out.point.x = self.falso_posizione[0]
+            out.point.y = self.falso_posizione[1]
+            out.point.z = msg.point.z
+            self.corrupted_pub.publish(out)
+            return
 
         if self.jamming_active and segnale_valido:
             noise_x = np.random.normal(0, self.deviazione_rumore) # rumore gaussiano con deviazione standard di 0.3

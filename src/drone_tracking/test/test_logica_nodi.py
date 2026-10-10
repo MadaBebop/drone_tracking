@@ -1485,3 +1485,45 @@ def test_ogni_parametro_aggiorna_l_attributo_che_il_nodo_legge():
     assert not disallineati, (
         'parametri che non aggiornano l attributo letto dal nodo:\n  '
         + '\n  '.join(disallineati))
+
+
+def test_il_bersaglio_non_fa_accelerazioni_impossibili():
+    """Nessun veicolo frena a cinque g, e il nostro lo faceva.
+
+    Misurato prima della correzione: all inizio della fuga il bersaglio passava
+    da 10 m/s a 0.35 in due decimi di secondo, 48 m/s^2. La discontinuita cade
+    esattamente nell istante su cui il progetto misura tutto, e presenta al
+    filtro un moto che nessun bersaglio vero produce.
+
+    La soglia e larga rispetto al limite dichiarato perche la derivata seconda
+    si stima per differenze finite su una tabella campionata: conta che sia
+    dell ordine di `accel_evasione`, non che lo rispetti al decimale.
+    """
+    nodo = bersaglio_prefissato()
+    try:
+        passo = 0.05
+        campioni = [nodo._posa_prefissata(i * passo)[:2] for i in range(4000)]
+        velocita = [math.hypot(b[0] - a[0], b[1] - a[1]) / passo
+                    for a, b in zip(campioni, campioni[1:])]
+        accelerazioni = [abs(b - a) / passo for a, b in zip(velocita, velocita[1:])]
+        assert max(accelerazioni) <= nodo.accel_evasione * 1.5, (
+            '%.1f m/s2, cioe %.1f g' % (max(accelerazioni),
+                                        max(accelerazioni) / 9.81))
+    finally:
+        nodo.destroy_node()
+
+
+def test_cambiare_un_parametro_ricostruisce_il_profilo():
+    """La tabella vale solo per i valori con cui e stata costruita.
+
+    Tenerla dopo un cambio a caldo riprodurrebbe il guasto gia pagato oggi: il
+    parametro risulta impostato, la rilettura conferma, e il nodo continua col
+    valore vecchio. Qui si verifica che la cache non sopravviva ai suoi dati.
+    """
+    nodo = bersaglio_prefissato()
+    try:
+        prima = nodo._posa_prefissata(60.0)
+        nodo.vel_evasione = nodo.vel_evasione * 2.0
+        assert nodo._posa_prefissata(60.0) != prima, 'la tabella non si e rifatta'
+    finally:
+        nodo.destroy_node()

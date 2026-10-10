@@ -80,7 +80,7 @@ class Monitor(Node):
                                  lambda m: setattr(self, 'alt', m.data), best)
         self.create_subscription(PoseStamped, '/mavros/local_position/pose',
                                  lambda m: setattr(self, 'pos', m.pose.position), best)
-        self.create_subscription(Bool, '/gps/jammed',
+        self.create_subscription(Bool, '/percezione/disturbata',
                                  lambda m: setattr(self, 'jammed', m.data), 10)
         self.create_subscription(Bool, '/gps/denial_active',
                                  lambda m: setattr(self, 'gnss_negato', m.data), 10)

@@ -225,7 +225,7 @@ entrambi: è la R adattiva che fa scendere il guadagno di Kalman.
 Per sapere quando il jammer è attivo:
 
 ```bash
-ros2 topic echo /gps/jammed
+ros2 topic echo /percezione/disturbata
 ```
 
 **6. Guarda cosa vede il drone**
@@ -464,7 +464,7 @@ Cicla automaticamente ON/OFF su un timer a 10 Hz: `jam_on_duration` tick attivo,
 
 Quando il jamming è attivo:
 
-- pubblica `/gps/jammed: true` e `/rf/noise_level: 0.8`
+- pubblica `/percezione/disturbata: true` e `/rf/noise_level: 0.8`
 - inietta rumore gaussiano di deviazione standard `deviazione_rumore` sulle
   coordinate, con clamp a `[-1, +1]`
 - con probabilità `probabilita_perdita_segnale` simula la perdita totale del
@@ -867,6 +867,21 @@ le dimensioni di un veicolo leggero — comandandone la posa tramite il servizio
 | `PATTUGLIO` | Orbita circolare attorno a `(150, 150)`, raggio `raggio_orbita` (40 m) | `velocita_angolare` (0.25 rad/s ≈ **10 m/s**, 36 km/h) |
 | `EVASIONE` | Fuga in linea retta opposta al drone, per `durata_evasione_s` | `vel_evasione` a regime, raggiunta con rampa `accel_evasione` |
 
+**Due modi, e servono a cose diverse.** `modo_bersaglio` vale `reattivo` per
+default — la tabella qui sopra, il bersaglio guarda il drone — e si porta a
+`prefissato` per misurare, rendendo la traiettoria una funzione del solo tempo
+trascorso dall'avvio. Il perché, e quanto cambia, stanno in *Lo stimolo
+ripetibile*: in breve, nel modo reattivo due prove della stessa configurazione
+avevano il bersaglio a 44-357 m di distanza dopo un minuto, e confrontarle
+significava confrontare esperimenti diversi.
+
+| Parametro | Default | Vale solo in |
+|---|---|---|
+| `modo_bersaglio` | `reattivo` | — |
+| `ritardo_evasione_s` | 10.0 | `reattivo` (attesa dopo l'aggancio) |
+| `istante_prima_evasione_s` | 30.0 | `prefissato` |
+| `periodo_evasione_s` | 45.0 | `prefissato` |
+
 **Valori attuali.** La fuga è a `vel_evasione` = 15 m/s, cioè 54 km/h, raggiunti
 con una rampa di 3 m/s²: cinque secondi per il regime, come un mezzo leggero su
 sterrato. Dura `durata_evasione_s` = 20 s, che a quella velocità porta il
@@ -1165,7 +1180,7 @@ messo alla prova è il sistema reale, autopilota compreso, non una sua
 imitazione. È un nodo distinto da `jammer_node` perché i due guasti sono
 fisicamente diversi — quello disturba il canale con cui il bersaglio viene
 rilevato, questo il GPS del velivolo — e confonderli era il difetto principale
-della prima versione, in cui `/gps/jammed` veniva pubblicato ma non guidava
+della prima versione, in cui `/percezione/disturbata` — allora `/gps/jammed` — veniva pubblicato ma non guidava
 nulla.
 
 | Modo | Parametro | Effetto |
@@ -1499,10 +1514,14 @@ separatamente, e si sono fermate entrambe davanti alla medesima stima. Quando
 due strade distinte incontrano lo stesso muro, è quel muro il problema.
 
 L'ingresso noto è ora implementato, insieme al rifiuto delle misure
-implausibili e alla pubblicazione del NIS. **L'effetto non è ancora misurato**,
-quindi i due termini che dipendono da quella stima — `k_anticipo` e
-`durata_inseguimento_cieco_s` — restano a zero finché una batteria di prove non
-dirà se conviene riaccenderli.
+implausibili e alla pubblicazione del NIS. I due termini che dipendono da
+quella stima — `k_anticipo` e `durata_inseguimento_cieco_s` — **restano a zero,
+e ora per una misura invece che per prudenza**: vedi *Le due funzioni spente*.
+
+La batteria che lo decide è stata possibile solo dopo aver reso ripetibile lo
+stimolo. Con il bersaglio reattivo servivano ottantasette prove per
+configurazione per distinguere un effetto del 25% sulla durata dell'aggancio;
+con quello prefissato e il confronto appaiato ne sono bastate tre.
 
 **Cosa resta acceso.** Il centro della ricerca sull'ultima posizione nota del
 bersaglio, che non dipende dalla velocità e la cui utilità è visibile nel
@@ -1606,12 +1625,134 @@ poteva ancora misurare prima di incontrarlo.
 
 ---
 
+## Lo stimolo ripetibile, e quanto cambia
+
+Il progetto ha a lungo dichiarato che le sue grandezze d'esito cadono «dentro
+la dispersione», citando un fattore due-quattro fra prove identiche. Era una
+stima a occhio, letta dalle tabelle. `scripts/dispersione.py` la calcola, e il
+primo numero che produce non è statistico ma fisico.
+
+### Due prove identiche non erano lo stesso esperimento
+
+Distanza fra le posizioni del **bersaglio**, in prove con la stessa
+configurazione e lo stesso seme:
+
+| gruppo | a 10 s | a 30 s | a 60 s |
+|---|---|---|---|
+| `ts00` | 0 m | 2 m | 49 m |
+| `rtarata` | 1 m | 11 m | 93 m |
+| `spirale` | 0 m | 48 m | 217 m |
+| `fix2cieco` | 1 m | 36 m | 357 m |
+
+Partono insieme e dopo un minuto distano decine o centinaia di metri. La
+crescita è di circa un fattore dieci ogni venticinque secondi: la firma di un
+anello chiuso sensibile alle condizioni iniziali, inevitabile quando il
+bersaglio scappa dal drone e il drone insegue il bersaglio. **Oltre i trenta
+secondi due prove non condividevano più lo stimolo.**
+
+### Il modo `prefissato`
+
+`target_mover_node` ha un parametro `modo_bersaglio`. Il default `reattivo` è
+il comportamento di sempre e serve a mostrare il sistema; `prefissato` lo rende
+misurabile, facendo della traiettoria una **funzione pura del tempo trascorso
+dall'avvio**: stessa orbita, fughe agli stessi istanti e nelle stesse
+direzioni, qualunque cosa faccia il drone. Si imposta a caldo prima di avviare
+la missione.
+
+```bash
+ros2 param set /target_mover_node modo_bersaglio prefissato
+```
+
+Due dettagli non ovvi. Le direzioni di fuga **si alternano** fra andata e
+ritorno rispetto al centro iniziale: senza, il bersaglio accumulerebbe 260 m a
+ogni fuga e dopo due minuti sarebbe fuori dallo scenario, lasciando vuota la
+seconda metà di ogni prova. E lo spazio percorso in fuga è calcolato **in forma
+chiusa** anziché integrato passo passo, così non dipende da come il timer ha
+scandito il tempo — che è proprio il rumore da cui si sta scappando.
+
+Verificato in volo contro il profilo teorico: **5 cm di scarto quadratico
+medio**, sfasamento nullo. E fra prove ripetute il bersaglio passa da 44-357 m
+di distanza a **1 m**.
+
+### Quanto si guadagna, e quanto no
+
+Dispersione fra prove identiche, e numero di prove per distinguere un effetto
+del 25%:
+
+| indicatore | reattivo | prefissato | prove: reattivo → prefissato |
+|---|---|---|---|
+| distanza in `AGGANCIO` | 21 % | **2 %** | 12 → **2** |
+| visto in `AGGANCIO` | 20 % | **7 %** | 11 → **3** |
+| tempo in `AGGANCIO` | 33 % | 22 % | 28 → 13 |
+| durata dell'aggancio | 59 % | 30 % | 87 → 23 |
+| errore di velocità | 17 % | 25 % | 8 → 16 |
+
+Quattro indicatori su cinque migliorano, due in modo decisivo. Il quinto no, e
+dice qualcosa: **rendere deterministico lo stimolo non rende deterministico il
+drone.** La traiettoria del bersaglio è fissa al centimetro, quella
+dell'inseguitore no, e gli indicatori che dipendono soprattutto da lui restano
+rumorosi. È coerente con il limite che questo progetto dichiara da sempre.
+
+Una riserva: il confronto mescola il passaggio da reattivo a prefissato **e**
+uno scenario diverso. Con tre prove non si possono separare.
+
+## Le due funzioni spente: il verdetto
+
+`k_anticipo` e `durata_inseguimento_cieco_s` erano state azzerate quando
+l'errore sulla stima di velocità valeva 10.8 m/s, cioè quanto il segnale. Dopo
+l'ingresso noto, il gating e la marcatura temporale è sceso a 6.7: la premessa
+non valeva più, e nessuno era tornato a controllare.
+
+Nove voli col bersaglio prefissato, tre configurazioni **a blocchi** — tutte e
+tre dentro ogni giro, invece di tre prove di una e poi tre dell'altra.
+
+**Guida predittiva (`k_anticipo` 1.0) — resta spenta.**
+
+| | giro 1 | giro 2 | giro 3 | medio | intervallo 95% |
+|---|---|---|---|---|---|
+| visto in `AGGANCIO` | +0.4 | −0.7 | +0.5 | **+0.1 %** | −1.6 … +1.7 |
+| distanza in `AGGANCIO` | +3.0 | +2.6 | +3.3 | **+2.97 m** | +2.0 … +3.9 |
+
+Sull'inquadratura non fa nulla, e non nel senso che l'effetto non si vede: è
+nullo misurato con precisione. Sulla distanza fa qualcosa nel verso sbagliato,
+tre metri più lontano, in modo quasi identico nei tre giri.
+
+**Inseguimento cieco (`durata_inseguimento_cieco_s` 8.0) — resta spento, per
+un motivo diverso.**
+
+| | giro 1 | giro 2 | giro 3 | medio | intervallo 95% |
+|---|---|---|---|---|---|
+| visto in `AGGANCIO` | −14.1 | +16.7 | +12.4 | +8.4 % | −37 … +47 |
+| distanza in `AGGANCIO` | +7.6 | −8.7 | +3.8 | +2.2 % | −20 … +22 |
+
+Niente è distinguibile dal rumore, ma le differenze **cambiano segno** fra un
+giro e l'altro: nel primo peggiora l'inquadratura di 14 punti, nel secondo la
+migliora di 17. Non sposta la media, allarga la dispersione — a volte indovina
+dove sta andando il bersaglio, a volte no. Per una funzione che interviene
+quando il bersaglio è già perso, è una proprietà peggiore di un piccolo danno
+medio.
+
+### Perché il disegno a blocchi non era un dettaglio
+
+Il secondo giro è stato peggiore per **tutte e tre** le configurazioni:
+inquadratura 45 % contro 66-68 degli altri due, quasi certamente carico della
+macchina. Confrontando le medie dei gruppi, quella caduta comune gonfia la
+dispersione e il +3 m della guida predittiva sparisce dentro il rumore.
+Confrontando giro per giro — come il disegno a blocchi permette — esce con un
+intervallo di ±1 m.
+
+```bash
+python3 scripts/dispersione.py 'metrics/*dec0_g*.csv' 'metrics/*deca_g*.csv'
+```
+
+---
+
 ## Misura e ripetibilità
 
 Le cifre citate in questo documento nascevano da script Python scritti sul
 momento e mai salvati: nessun terzo poteva riprodurle, e due prove della stessa
 configurazione non erano confrontabili perché a cambiare era anche lo strumento.
-Gli elementi che chiudono la lacuna sono quattro.
+Gli elementi che chiudono la lacuna sono cinque.
 
 **Tempo di simulazione.** Tutti i nodi girano con `use_sim_time` attivo e
 `/clock` pontato da Gazebo (`tracking.launch.py`). Prima gli intervalli erano
@@ -1626,6 +1767,23 @@ ros2 launch drone_tracking tracking.launch.py use_sim_time:=false
 
 **Disturbo ripetibile.** `jammer_node` parte da un seme fisso (`seed`, default
 42), quindi due prove ricevono la stessa sequenza di rumore.
+
+**Stimolo ripetibile.** Il seme fisso non bastava: il bersaglio reagiva al
+drone, e l'anello chiuso faceva divergere due prove identiche di 44-357 m in un
+minuto. Con `modo_bersaglio: prefissato` la traiettoria è funzione del solo
+tempo e la divergenza scende a 1 m. Vedi *Lo stimolo ripetibile*.
+
+**Dispersione misurata, non stimata.** `scripts/dispersione.py` calcola quanto
+variano prove identiche e quante ne servono per distinguere un effetto di una
+data entità — da verificare **prima** di spendere ore di macchina, perché una
+batteria troppo corta produce un numero dall'aria di risultato senza esserlo.
+Con due pattern fa il confronto appaiato giro per giro, l'analisi corretta per
+le prove disposte a blocchi.
+
+```bash
+python3 scripts/dispersione.py
+python3 scripts/dispersione.py 'metrics/*A_g*.csv' 'metrics/*B_g*.csv'
+```
 
 **Una prova in un comando.** `prova.sh` fa la sequenza completa — fotografa la
 configurazione, decolla se serve, avvia la missione, attende, riassume:
@@ -1960,7 +2118,7 @@ si riferisce, che dopo l'estrapolazione non è più quello della misura.
 
 | Topic | Tipo | Descrizione |
 |---|---|---|
-| `/gps/jammed` | `std_msgs/Bool` | Stato del jamming GPS |
+| `/percezione/disturbata` | `std_msgs/Bool` | Disturbo sul canale di rilevamento. **Non** il GPS: quello è `/gps/denial_active` |
 | `/rf/noise_level` | `std_msgs/Float32` | Intensità rumore RF (0.0 – 1.0) |
 
 ### Controllo e missione

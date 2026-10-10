@@ -49,9 +49,12 @@ class TargetMoverNode(Node):
 
         # Stato interno
         self.fase = FaseBersaglio.PATTUGLIO
-        self.t = 0.0
         self.pos_x = 150.0
         self.pos_y = 150.0
+        # Velocita del bersaglio: ora e uno stato, e cambia solo passando per
+        # `_accelera`. Prima la fuga ripartiva da zero, con una decelerazione
+        # istantanea di cinque g che nessun veicolo puo fare.
+        self.velocita = (0.0, 0.0)
         self.drone_x = 0.0
         self.drone_y = 0.0
         
@@ -124,6 +127,15 @@ class TargetMoverNode(Node):
             self, 'periodo_evasione_s', 45.0)
         # Origine dei tempi del profilo. Senza, non si saprebbe da dove contare.
         self.istante_avvio_missione = None
+        # La tabella del profilo prefissato, costruita alla prima richiesta.
+        self._tabella = None
+        self._firma_tabella = None
+        self._passo_tabella = 0.02
+        self.orizzonte_s = parametro(
+            self, 'orizzonte_profilo_s', 600.0, 'orizzonte_s')
+        # Quanta velocita radiale si comanda per metro di scarto dal raggio
+        # dell orbita. Governa quanto stretto e il rientro dopo una fuga.
+        self.guadagno_rientro = parametro(self, 'guadagno_rientro', 0.5)
 
         self.ultimo_istante = None
         self.proc_pendente  = None
@@ -167,10 +179,13 @@ class TargetMoverNode(Node):
         15 m/s con il parametro a 1.2.
         """
         self.fase = FaseBersaglio.PATTUGLIO
-        self.t = 0.0
         self.centro_x, self.centro_y = self.centro_iniziale
         self.pos_x = self.centro_x + self.raggio
         self.pos_y = self.centro_y
+        # Ferma al punto di partenza no: gia in moto sull orbita, altrimenti il
+        # primo istante della prova conterrebbe un'accelerazione da zero che il
+        # bersaglio non ha mai davvero fatto.
+        self.velocita = (0.0, self.velocita_angolare * self.raggio)
         self.tempo_evasione = 0.0
         self.istante_aggancio = None
 
@@ -214,70 +229,130 @@ class TargetMoverNode(Node):
         self.ultimo_istante = adesso
         return float(min(max(dt, 0.01), 0.5))
 
-    def _spazio_rampa(self, tau):
-        """Distanza percorsa in `tau` secondi di fuga, rampa compresa.
+    # ------------------------------------------------------------ dinamica
+    def _accelera(self, velocita, desiderata, dt):
+        """Avvicina la velocita a quella voluta senza superare l accelerazione.
 
-        Integrale della stessa legge del modo reattivo — accelerazione
-        costante fino al regime, poi regime — ma in forma chiusa invece che
-        accumulata passo passo, cosi il risultato non dipende da come il timer
-        ha scandito il tempo.
+        E l unico punto in cui il bersaglio cambia velocita, e per questo
+        l unico punto che garantisce che non faccia cose impossibili.
         """
-        if tau <= 0.0:
-            return 0.0
-        t_rampa = self.vel_evasione / self.accel_evasione
-        if tau <= t_rampa:
-            return 0.5 * self.accel_evasione * tau * tau
-        return (0.5 * self.vel_evasione * t_rampa
-                + self.vel_evasione * (tau - t_rampa))
+        dvx = desiderata[0] - velocita[0]
+        dvy = desiderata[1] - velocita[1]
+        massimo = self.accel_evasione * dt
+        norma = math.hypot(dvx, dvy)
+        if norma > massimo and norma > 0.0:
+            dvx *= massimo / norma
+            dvy *= massimo / norma
+        return (velocita[0] + dvx, velocita[1] + dvy)
+
+    def _velocita_pattuglia(self, posizione, centro):
+        """Velocita voluta sull orbita: tangenziale piu richiamo sul raggio.
+
+        Il richiamo fa RIENTRARE sull orbita chi se ne e allontanato, invece di
+        pretendere che ci sia gia sopra. E cio che rende il ritorno dalla fuga
+        una manovra con un raggio di curvatura, e non un teletrasporto sul
+        cerchio.
+        """
+        dx = posizione[0] - centro[0]
+        dy = posizione[1] - centro[1]
+        raggio_attuale = math.hypot(dx, dy) or 1e-6
+        ux, uy = dx / raggio_attuale, dy / raggio_attuale
+        v_orbita = self.velocita_angolare * self.raggio
+        richiamo = -self.guadagno_rientro * (raggio_attuale - self.raggio)
+        return (-uy * v_orbita + ux * richiamo,
+                ux * v_orbita + uy * richiamo)
+
+    def _centro_a_sinistra(self, posizione, velocita):
+        """Centro dell orbita che passa per qui con questa direzione.
+
+        Percorrendo il cerchio in senso antiorario il centro sta a sinistra
+        della velocita: mettendolo li, posizione e direzione restano quelle
+        correnti e il pattugliamento riprende senza discontinuita.
+        """
+        norma = math.hypot(*velocita) or 1.0
+        return (posizione[0] - self.raggio * velocita[1] / norma,
+                posizione[1] + self.raggio * velocita[0] / norma)
+
+    # -------------------------------------------------------- prefissato
+    def _tabella_prefissata(self):
+        """Traiettoria prefissata, integrata una volta sola a passo fisso.
+
+        Il passo fisso e cio che la rende identica fra una prova e l altra: non
+        dipende da quanto la macchina fosse carica quel giorno. Si costruisce
+        alla prima richiesta e poi si consulta soltanto.
+        """
+        # La tabella vale solo per i valori con cui e stata costruita. Tenerla
+        # dopo che uno di quelli e cambiato a caldo riprodurrebbe il guasto
+        # muto che questo progetto ha gia pagato: il parametro risulta
+        # impostato, la rilettura conferma, e il nodo continua col vecchio.
+        firma = (self.raggio, self.velocita_angolare, self.vel_evasione,
+                 self.accel_evasione, self.durata_evasione_s,
+                 self.istante_prima_evasione_s, self.periodo_evasione_s,
+                 self.guadagno_rientro, self.centro_iniziale)
+        if self._tabella is not None and self._firma_tabella == firma:
+            return self._tabella
+        self._firma_tabella = firma
+
+        dt = self._passo_tabella
+        periodo = max(self.periodo_evasione_s, self.durata_evasione_s + 1.0)
+        posizione = (self.centro_iniziale[0] + self.raggio,
+                     self.centro_iniziale[1])
+        velocita = (0.0, self.velocita_angolare * self.raggio)
+        centro = self.centro_iniziale
+        episodio, in_fuga, direzione = 0, False, (1.0, 0.0)
+        tabella = []
+
+        for i in range(int(self.orizzonte_s / dt) + 2):
+            t = i * dt
+            inizio_fuga = self.istante_prima_evasione_s + episodio * periodo
+
+            if not in_fuga and t >= inizio_fuga:
+                in_fuga = True
+                dx = posizione[0] - self.centro_iniziale[0]
+                dy = posizione[1] - self.centro_iniziale[1]
+                norma = math.hypot(dx, dy) or 1.0
+                # Verso l esterno nelle fughe pari, di ritorno in quelle
+                # dispari: il bersaglio resta in una regione limitata senza mai
+                # guardare dove sia il drone.
+                verso = 1.0 if episodio % 2 == 0 else -1.0
+                direzione = (verso * dx / norma, verso * dy / norma)
+            elif in_fuga and t >= inizio_fuga + self.durata_evasione_s:
+                in_fuga = False
+                episodio += 1
+                centro = self._centro_a_sinistra(posizione, velocita)
+
+            if in_fuga:
+                desiderata = (direzione[0] * self.vel_evasione,
+                              direzione[1] * self.vel_evasione)
+            else:
+                desiderata = self._velocita_pattuglia(posizione, centro)
+
+            velocita = self._accelera(velocita, desiderata, dt)
+            posizione = (posizione[0] + velocita[0] * dt,
+                         posizione[1] + velocita[1] * dt)
+            tabella.append((posizione[0], posizione[1],
+                            FaseBersaglio.EVASIONE if in_fuga
+                            else FaseBersaglio.PATTUGLIO))
+
+        self._tabella = tabella
+        return tabella
 
     def _posa_prefissata(self, t):
-        """Dove sta il bersaglio a `t` secondi dall'avvio. Funzione pura.
+        """Dove sta il bersaglio a `t` secondi dall avvio. Funzione pura.
 
         Nessun riferimento alla posizione del drone ne allo stato accumulato
         del nodo: due esecuzioni con lo stesso `t` danno lo stesso punto. E la
         proprieta che rende due prove confrontabili campione per campione
         invece che fra medie di tre.
         """
-        cx, cy = self.centro_iniziale
-        raggio, omega = self.raggio, self.velocita_angolare
-        primo = self.istante_prima_evasione_s
-        periodo = max(self.periodo_evasione_s, self.durata_evasione_s + 1.0)
-        fase, tempo, episodio = 0.0, 0.0, 0
-
-        while True:
-            inizio = primo + episodio * periodo
-            if t < inizio:
-                ang = fase + omega * (t - tempo)
-                return (cx + raggio * math.cos(ang),
-                        cy + raggio * math.sin(ang),
-                        FaseBersaglio.PATTUGLIO)
-
-            ang = fase + omega * (inizio - tempo)
-            px, py = cx + raggio * math.cos(ang), cy + raggio * math.sin(ang)
-
-            # Verso l'esterno nelle fughe pari, di ritorno in quelle dispari:
-            # il bersaglio resta in una regione limitata senza mai guardare
-            # dove sia il drone.
-            dx = px - self.centro_iniziale[0]
-            dy = py - self.centro_iniziale[1]
-            norma = math.hypot(dx, dy) or 1.0
-            verso = 1.0 if episodio % 2 == 0 else -1.0
-            ux, uy = verso * dx / norma, verso * dy / norma
-
-            if t < inizio + self.durata_evasione_s:
-                spazio = self._spazio_rampa(t - inizio)
-                return (px + ux * spazio, py + uy * spazio,
-                        FaseBersaglio.EVASIONE)
-
-            spazio = self._spazio_rampa(self.durata_evasione_s)
-            px, py = px + ux * spazio, py + uy * spazio
-            # Stesso raccordo del modo reattivo: il centro va dietro la
-            # direzione di fuga, cosi l'orbita riprende senza strappi.
-            fase = math.atan2(uy, ux)
-            cx = px - raggio * math.cos(fase)
-            cy = py - raggio * math.sin(fase)
-            tempo = inizio + self.durata_evasione_s
-            episodio += 1
+        tabella = self._tabella_prefissata()
+        t = max(0.0, t)
+        indice = min(int(t / self._passo_tabella), len(tabella) - 2)
+        a, b = tabella[indice], tabella[indice + 1]
+        quota = (t - indice * self._passo_tabella) / self._passo_tabella
+        return (a[0] + (b[0] - a[0]) * quota,
+                a[1] + (b[1] - a[1]) * quota,
+                a[2])
 
     def avvia_evasione(self):
         self.fase = FaseBersaglio.EVASIONE
@@ -318,28 +393,23 @@ class TargetMoverNode(Node):
             return
 
         if self.fase == FaseBersaglio.PATTUGLIO:
-            self.t += self.velocita_angolare * dt
-            self.pos_x = self.centro_x + self.raggio * math.cos(self.t)
-            self.pos_y = self.centro_y + self.raggio * math.sin(self.t)
-
-        elif self.fase == FaseBersaglio.EVASIONE:
+            desiderata = self._velocita_pattuglia(
+                (self.pos_x, self.pos_y), (self.centro_x, self.centro_y))
+        else:
             self.tempo_evasione += dt
-            # Rampa di accelerazione, satura alla velocità di regime.
-            v = min(self.vel_evasione, self.accel_evasione * self.tempo_evasione)
-            self.pos_x += self.dir_evasione_x * v * dt
-            self.pos_y += self.dir_evasione_y * v * dt
+            desiderata = (self.dir_evasione_x * self.vel_evasione,
+                          self.dir_evasione_y * self.vel_evasione)
 
-            if self.tempo_evasione >= self.durata_evasione_s:
-                self.fase = FaseBersaglio.PATTUGLIO
-                # Il centro va messo DIETRO la direzione di fuga, con la fase
-                # pari a quella direzione: cosi la posizione resta invariata e
-                # il moto prosegue senza strappi. Metterlo sulla posizione
-                # corrente con t = 0 produrrebbe un salto pari al raggio, che
-                # il tracker leggerebbe come un movimento impossibile.
-                self.t = math.atan2(self.dir_evasione_y, self.dir_evasione_x)
-                self.centro_x = self.pos_x - self.raggio * math.cos(self.t)
-                self.centro_y = self.pos_y - self.raggio * math.sin(self.t)
-                self.get_logger().info('Evasione completata — riprende pattugliamento')
+        self.velocita = self._accelera(self.velocita, desiderata, dt)
+        self.pos_x += self.velocita[0] * dt
+        self.pos_y += self.velocita[1] * dt
+
+        if (self.fase == FaseBersaglio.EVASIONE
+                and self.tempo_evasione >= self.durata_evasione_s):
+            self.fase = FaseBersaglio.PATTUGLIO
+            self.centro_x, self.centro_y = self._centro_a_sinistra(
+                (self.pos_x, self.pos_y), self.velocita)
+            self.get_logger().info('Evasione completata — riprende pattugliamento')
 
         self._invia_posa(self.pos_x, self.pos_y, self.quota_modello)
 
