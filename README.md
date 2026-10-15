@@ -19,6 +19,17 @@ Il progetto nasce dall'analisi delle tecnologie drone impiegate nel conflitto
 russo-ucraino, dove il jamming GPS di massa ha reso necessari sistemi di
 navigazione autonomi basati su visione artificiale.
 
+> **Prima di leggere il resto.** Questo documento descrive il sistema e racconta
+> ogni misura nel dettaglio in cui è stata fatta, ed è lungo. Per sapere in
+> pochi minuti **quali affermazioni sono dimostrate, quali no e perché**, con il
+> numero accanto a ciascuna, vedi
+> [docs/cosa-e-dimostrato.md](docs/cosa-e-dimostrato.md). Fra le affermazioni
+> non dimostrate c'è anche una di quelle nell'elenco qui sopra: la resistenza
+> al jamming GPS.
+>
+> Per installare il progetto su una macchina nuova:
+> [docs/setup-linux.md](docs/setup-linux.md).
+
 ---
 
 ## Architettura del sistema

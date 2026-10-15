@@ -6,7 +6,7 @@ comandi abbiano senso.
 
 Serve quando si ricostruisce una macchina virtuale, si passa a un portatile
 nuovo, o qualcun altro deve riprodurre le misure. È stato scritto ripercorrendo
-una ricostruzione vera, quindi contiene anche gli inciampi — che sono la parte
+una ricostruzione vera, quindi contiene anche gli inciampi, che sono la parte
 che fa perdere il pomeriggio.
 
 Le versioni non sono negoziabili fra loro: ROS 2 Jazzy esiste solo per Ubuntu
@@ -137,7 +137,7 @@ Tre dettagli, tutti costati tempo.
 
 `--system-site-packages` è ciò che fa vedere al venv il wxPython installato da
 apt: senza, il flag `--console` non apre nulla e non spiega perché. Il
-container non ha wxPython di proposito — lì non c'è GUI — quindi chi copia la
+container non ha wxPython di proposito, perché lì non c'è GUI, quindi chi copia la
 ricetta dal `Dockerfile` resta senza console.
 
 `future` non è dichiarato dalla wheel di MAVProxy ma è importato da
@@ -160,7 +160,7 @@ colcon build --symlink-install
 
 Il repository versiona mondo e modello sotto `sim/`, ma `gz sim` li carica da
 `ardupilot_gazebo/`. Senza questo passaggio `git pull` aggiorna file che la
-simulazione non legge mai — e il guasto è silenzioso, perché tutto continua a
+simulazione non legge mai, e il guasto è silenzioso, perché tutto continua a
 funzionare mostrando la versione vecchia.
 
 ```bash
@@ -205,31 +205,31 @@ Verifica che sia risolta:
 gz sim --versions      # deve rispondere 8.x.x
 ```
 
-## 10 · Avvio — cinque terminali, in quest'ordine
+## 10 · Avvio: cinque terminali, in quest'ordine
 
 L'ordine è obbligatorio: il SITL deve trovare Gazebo già in ascolto sulle porte
 JSON.
 
 ```bash
-# T1 — Gazebo (senza -s, così si apre la finestra 3D)
+# T1. Gazebo (senza -s, così si apre la finestra 3D)
 gz sim -v4 -r ~/ardupilot_gazebo/worlds/iris_runway.sdf
 ```
 
 ```bash
-# T2 — ArduPilot SITL
+# T2. ArduPilot SITL
 cd ~/ardupilot && ./build/sitl/bin/arducopter --model JSON --speedup 1 \
   --sim-address=127.0.0.1 --sim-port-in=9013 --sim-port-out=9012 \
   -I0 --defaults Tools/autotest/default_params/gazebo-iris.parm,$HOME/drone_tracking_ws/docker/sitl-defaults.parm
 ```
 
 ```bash
-# T3 — MAVProxy, con la finestra di stato
+# T3. MAVProxy, con la finestra di stato
 mavproxy.py --master tcp:127.0.0.1:5760 \
   --out 127.0.0.1:14550 --out udp:127.0.0.1:14555 --console
 ```
 
 ```bash
-# T4 — MAVROS
+# T4. MAVROS
 ros2 run mavros mavros_node --ros-args \
   -p fcu_url:=udp://:14555@127.0.0.1:14556 \
   -p target_system_id:=1 -p target_component_id:=1 \
@@ -237,7 +237,7 @@ ros2 run mavros mavros_node --ros-args \
 ```
 
 ```bash
-# T5 — i nodi del progetto
+# T5. I nodi del progetto
 cd ~/drone_tracking_ws && source install/setup.bash
 ros2 launch drone_tracking tracking.launch.py
 ```
@@ -252,7 +252,7 @@ dal waypoint resta infinita e il drone non si muove.
 
 E va collegato all'**uscita UDP di MAVProxy**, non alla porta TCP del SITL: su
 `SERIAL1` ArduPilot manda l'heartbeat ma non gli stream di posizione, quindi
-`/mavros/state` funziona mentre `local_position/pose` resta muto — il guasto
+`/mavros/state` funziona mentre `local_position/pose` resta muto, ed è il guasto
 peggiore, perché sembra che la connessione sia a posto.
 
 ## 11 · Guardare cosa succede
@@ -301,7 +301,7 @@ docker exec drone-tracking bash -lc \
 vuol dire che `GZ_CONFIG_PATH` è stato sovrascritto. Vedi il passo 9.
 
 **`Arming checks disabled`, annunciato da MAVProxy a ogni armamento, è falso**
-— anche quando i controlli sono tutti attivi, come lo sono in questo progetto
+anche quando i controlli sono tutti attivi, come lo sono in questo progetto
 (`ARMING_SKIPCHK 0`). Il modulo `arm` di MAVProxy legge `ARMING_CHECK`, che in
 questa versione di ArduPilot non esiste, ottiene `None` e conclude che siano
 spenti. Dopo un avvio a freddo il primo tentativo di arming può essere
