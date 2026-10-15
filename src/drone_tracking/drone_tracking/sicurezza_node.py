@@ -66,11 +66,20 @@ class SicurezzaNode(Node):
         self.azione = parametro(self, 'azione', 'RTL')
         self.interviene = parametro(self, 'interviene', True)
         self.frequenza_hz = parametro(self, 'frequenza_hz', 2.0)
+        # MAVROS pubblica la posa fra 10 e 50 Hz: un secondo e mezzo sono
+        # fra quindici e settantacinque messaggi mancati, cioe un guasto e
+        # non una irregolarita.
+        self.timeout_telemetria_s = parametro(
+            self, 'timeout_telemetria_s', 1.5)
 
         self.posizione = None
         self.quota = None
         self.carica = None
         self.modo_volo = ''
+        # Istante dell'ultima posa ricevuta. Senza, il nodo non distingue
+        # «il velivolo e dentro i limiti» da «non so piu dove sia».
+        self.istante_posa = None
+        self.armato = False
         # Il limite inferiore di quota si arma solo dopo che la quota operativa
         # e stata raggiunta: durante il decollo il velivolo e sotto il minimo
         # per forza, e intervenire li significa abortire la salita.
@@ -90,9 +99,11 @@ class SicurezzaNode(Node):
         p = msg.pose.position
         self.posizione = (p.x, p.y)
         self.quota = p.z
+        self.istante_posa = self.get_clock().now().nanoseconds / 1e9
 
     def on_stato_volo(self, msg: State):
         self.modo_volo = msg.mode
+        self.armato = msg.armed
 
     def on_batteria(self, msg: BatteryState):
         # MAVROS riporta -1 quando la carica non e nota: non e uno zero, ed
@@ -107,8 +118,28 @@ class SicurezzaNode(Node):
             self.get_logger().warn('Blocco di sicurezza rimosso su richiesta')
 
     # -------------------------------------------------------------- verifica
+    def _eta_telemetria(self):
+        """Da quanti secondi non arriva una posa, oppure None.
+
+        None significa che il controllo non e applicabile: o non e mai arrivata
+        una posa, o il velivolo non risulta ne armato ne mai salito in quota, e
+        a terra il silenzio non e un guasto.
+        """
+        if self.istante_posa is None:
+            return None
+        if not (self.armato or self.in_quota_operativa):
+            return None
+        return self.get_clock().now().nanoseconds / 1e9 - self.istante_posa
+
     def _violazione(self):
         """Primo limite superato, o None. L'ordine e per gravita."""
+        # Per prima cosa: i dati su cui si giudica sono ancora validi? Tutti i
+        # controlli sotto leggono valori memorizzati, e su valori vecchi
+        # risponderebbero «entro i limiti» guardando dove il velivolo era.
+        eta = self._eta_telemetria()
+        if eta is not None and eta > self.timeout_telemetria_s:
+            return ('telemetria ferma da {:.1f} s: la posizione non e piu '
+                    'nota'.format(eta))
         if self.carica is not None and self.carica < self.batteria_min:
             return 'batteria al {:.0f}%, sotto il minimo del {:.0f}%'.format(
                 100 * self.carica, 100 * self.batteria_min)

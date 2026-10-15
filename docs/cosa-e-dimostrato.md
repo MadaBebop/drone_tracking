@@ -94,6 +94,26 @@ parametri fosse autoritativo, il primo tentativo è stato rifiutato con
 `Arm: Gyros inconsistent` e il secondo accettato, con decollo regolare a 43 m.
 Il ciclo di ritentativi già presente assorbe il caso.
 
+### Il livello di sicurezza si accorge se la telemetria muore
+
+Fino al 16/10 il nodo memorizzava l'ultima posa ricevuta senza guardarne
+l'età: con il ponte verso l'autopilota morto a metà volo i valori restavano
+congelati all'ultima lettura buona, che era dentro i limiti, e la sorveglianza
+restava accesa e muta. Era un'omissione e non una scelta, perché il nodo di
+controllo e quello di missione avevano già lo stesso controllo.
+
+Verificato in volo uccidendo `mavros_node` a quota 49.7 m con la missione in
+corso: il blocco è scattato dopo **1.8 secondi**, coerente con il timeout di
+1.5 s valutato a 2 Hz, con motivo `telemetria ferma da 1.8 s: la posizione non
+è più nota`, e il nodo di controllo ha azzerato il comando. La reazione
+arriva quindi a valle e non si ferma al nodo che se ne accorge.
+
+Il controllo precede tutti gli altri limiti, e non per ordinamento estetico:
+gli altri leggono valori memorizzati, e su dati vecchi risponderebbero entro i
+limiti guardando dove il velivolo era. Resta scoperto il caso di una
+telemetria che muore durante la salita, prima della quota operativa e prima
+che arrivi uno stato di armato.
+
 ### Il bersaglio reattivo rende due prove identiche due esperimenti diversi
 
 Misurando la distanza fra le posizioni del bersaglio in prove con la stessa
@@ -217,11 +237,6 @@ direttamente l'errore di controllo.
 **Il soffitto percettivo è ~90 m**, misurato dalla legge con cui l'area
 apparente cala con il quadrato della quota. È più basso del tetto regolamentare
 di 120 m, quindi l'inviluppo utile è più stretto di quanto la norma suggerisca.
-
-**Il livello di sicurezza non ha watchdog.** Memorizza l'ultima posa, quota e
-carica ricevute e non ne guarda l'età: se la telemetria tace, i valori restano
-congelati all'ultima lettura buona e nessuna violazione viene più rilevata. Il
-silenzio viene interpretato come sicurezza.
 
 **Il bersaglio si muove per teletrasporto.** L'accelerazione è limitata perché
 le è stato imposto un limite, ma nulla lega il raggio di sterzata alla velocità

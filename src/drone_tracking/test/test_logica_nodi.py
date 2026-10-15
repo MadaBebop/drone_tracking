@@ -976,6 +976,11 @@ def sicurezza_in_volo(x=0.0, y=0.0, quota=50.0, carica=1.0):
     nodo.quota = quota
     nodo.carica = carica
     nodo.modo_volo = 'GUIDED'
+    # Telemetria fresca e velivolo armato: e la condizione normale in volo, e
+    # senza di essa il controllo sull eta dei dati non sarebbe mai esercitato
+    # dalle prove che seguono.
+    nodo.armato = True
+    nodo.istante_posa = ora(nodo)
     nodo.controlla()          # porta il nodo in quota operativa
     return nodo
 
@@ -1525,5 +1530,68 @@ def test_cambiare_un_parametro_ricostruisce_il_profilo():
         prima = nodo._posa_prefissata(60.0)
         nodo.vel_evasione = nodo.vel_evasione * 2.0
         assert nodo._posa_prefissata(60.0) != prima, 'la tabella non si e rifatta'
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_telemetria_ferma_e_una_violazione():
+    """Il silenzio non e sicurezza: e non sapere piu dove si e.
+
+    Senza questo controllo il nodo teneva l ultima posa ricevuta e non ne
+    guardava l eta: se il ponte verso l autopilota taceva a meta volo, i valori
+    restavano congelati all ultima lettura buona, che era dentro i limiti, e
+    la sorveglianza restava accesa e muta.
+    """
+    nodo = sicurezza_in_volo()
+    try:
+        assert nodo._violazione() is None, 'parte gia in violazione'
+        nodo.istante_posa = ora(nodo) - nodo.timeout_telemetria_s - 0.5
+        violazione = nodo._violazione()
+        assert violazione is not None, 'il silenzio non e stato rilevato'
+        assert 'telemetria' in violazione, violazione
+    finally:
+        nodo.destroy_node()
+
+
+def test_a_terra_il_silenzio_non_e_una_violazione():
+    """Prima del volo non c e nulla da sorvegliare.
+
+    Il controllo si arma solo quando il velivolo risulta armato o ha raggiunto
+    la quota operativa, altrimenti scatterebbe a ogni avvio dello stack mentre
+    MAVROS si collega.
+    """
+    nodo = SicurezzaNode()
+    try:
+        nodo.istante_posa = ora(nodo) - 60.0
+        nodo.armato = False
+        nodo.in_quota_operativa = False
+        assert nodo._violazione() is None
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_telemetria_ferma_viene_prima_degli_altri_limiti():
+    """Su dati vecchi gli altri controlli rispondono guardando il passato.
+
+    Un velivolo che ha superato il confine mentre la telemetria taceva risulta
+    ancora dentro, perche la posizione memorizzata e quella di prima. Il motivo
+    riportato deve essere il silenzio, non un giudizio fondato su di esso.
+    """
+    nodo = sicurezza_in_volo(x=0.0, y=0.0)
+    try:
+        nodo.carica = 0.01                       # anche la batteria e sotto
+        nodo.istante_posa = ora(nodo) - nodo.timeout_telemetria_s - 1.0
+        assert 'telemetria' in nodo._violazione()
+    finally:
+        nodo.destroy_node()
+
+
+def test_la_telemetria_fresca_non_blocca():
+    nodo = sicurezza_in_volo()
+    try:
+        for _ in range(5):
+            nodo.istante_posa = ora(nodo)
+            nodo.controlla()
+        assert not nodo.bloccato
     finally:
         nodo.destroy_node()
