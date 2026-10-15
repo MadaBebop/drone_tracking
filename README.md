@@ -1956,6 +1956,11 @@ ros2 launch drone_tracking tracking.launch.py etichetta_config:=gimbal_off seed:
 Da usare sulla VM/macchina Ubuntu dove ArduPilot e Gazebo sono installati
 localmente. Sostituire i percorsi con i propri. L'ordine è obbligatorio.
 
+> **Installarli da zero** — questa sezione presuppone la macchina già
+> preparata. Per costruirla da una Ubuntu appena installata, con le versioni
+> giuste e gli inciampi che costano il pomeriggio, vedi
+> [docs/setup-linux.md](docs/setup-linux.md).
+
 ### Preparazione, una volta sola
 
 **Symlink degli asset Gazebo.** Il repository versiona mondo e modello sotto
