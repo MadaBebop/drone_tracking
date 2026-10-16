@@ -43,7 +43,7 @@ COLONNE = [
     'gt_drone_x', 'gt_drone_y', 'gt_drone_z',
     'gt_target_x', 'gt_target_y', 'gt_target_z',
     'dist_xy_gt', 'dist_3d_gt', 'dist_xy_ekf',
-    'jam_attivo', 'gps_negato',
+    'jam_attivo', 'falso_aggancio', 'gps_negato',
 ]
 
 VUOTA = ['', '', '']
@@ -97,6 +97,8 @@ class MetricsNode(Node):
                                  self.on_velocita_drone, qos_mavros)
         self.create_subscription(Bool, '/percezione/disturbata',
                                  self.on_jam, 10)
+        self.create_subscription(Bool, '/percezione/falso_aggancio',
+                                 self.on_falso, 10)
         # Si registra il COMANDO al giunto e non il suo angolo effettivo: e il
         # comando a dire cosa il nodo ha chiesto, e un segno sbagliato si
         # vedrebbe qui accanto alla colonna dell'assetto.
@@ -121,6 +123,7 @@ class MetricsNode(Node):
         self.trk_vel = None
         self.jam = False
         self.gps_negato = False
+        self.falso_aggancio = False
         # Assetto del corpo: senza, l'effetto della stabilizzazione non si misura.
         self.roll = None
         self.pitch = None
@@ -298,6 +301,9 @@ class MetricsNode(Node):
     def on_jam(self, msg: Bool):
         self.jam = bool(msg.data)
 
+    def on_falso(self, msg: Bool):
+        self.falso_aggancio = bool(msg.data)
+
     def on_denial(self, msg: Bool):
         self.gps_negato = bool(msg.data)
 
@@ -372,7 +378,9 @@ class MetricsNode(Node):
         riga += terna(self.gt_drone)
         riga += terna(self.gt_bersaglio)
         riga += [dist_xy_gt, dist_3d_gt, dist_xy_ekf]
-        riga += [1 if self.jam else 0, 1 if self.gps_negato else 0]
+        riga += [1 if self.jam else 0,
+                 1 if self.falso_aggancio else 0,
+                 1 if self.gps_negato else 0]
 
         # Una riga piu corta dell'intestazione non darebbe errore: sposterebbe
         # i valori di una casella, e il CSV mentirebbe senza dirlo.

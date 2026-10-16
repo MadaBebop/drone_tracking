@@ -17,6 +17,11 @@ class JammerNode(Node):
         self.disturbo_pub = self.create_publisher(
             Bool, '/percezione/disturbata', 10)
 
+        # Il falso aggancio e un guasto diverso dal disturbo, non una sua
+        # versione piu forte: va distinto anche nel registro.
+        self.falso_pub = self.create_publisher(
+            Bool, '/percezione/falso_aggancio', 10)
+
         # Publisher: intensità del rumore sul datalink (0.0 - 1.0)
         self.noise_pub = self.create_publisher(
             Float32, '/rf/noise_level', 10)
@@ -100,6 +105,8 @@ class JammerNode(Node):
         noise_msg = Float32()
         noise_msg.data = 0.8 if self.jamming_active else 0.0
         self.noise_pub.publish(noise_msg)
+
+        self.falso_pub.publish(Bool(data=self._falso_attivo()))
 
     def _forse_falso_aggancio(self):
         """All inizio di una finestra di disturbo, decide se inventare un bersaglio.
