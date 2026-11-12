@@ -103,8 +103,14 @@ done
 sleep 2
 
 echo "→ Decollo a ${QUOTA} m"
+# Un esito negativo qui non basta a dichiarare fallito il decollo: su una
+# macchina sovraccarica la conferma del comando puo non arrivare in tempo
+# (success=False con result=0, cioe ACCEPTED) mentre il drone sta gia salendo.
+# Visto succedere: ritentare il decollo con il drone in aria lo fa rifiutare
+# per davvero. Fa fede la quota, verificata subito sotto.
 chiama "takeoff" /mavros/cmd/takeoff mavros_msgs/srv/CommandTOL \
-    "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: ${QUOTA}}"
+    "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: ${QUOTA}}" \
+    || echo "   il comando non ha confermato: verifico comunque la quota"
 
 # Conferma che il drone stia davvero salendo: i servizi possono rispondere
 # success=True e il velivolo restare a terra.
