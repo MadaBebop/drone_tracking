@@ -38,6 +38,7 @@ setup(
             'gnss_denial_node = drone_tracking.gnss_denial_node:main',
             'gimbal_node = drone_tracking.gimbal_node:main',
             'sicurezza_node = drone_tracking.sicurezza_node:main',
+            'stazione_node = drone_tracking.stazione_node:main',
         ],
     },
 )

@@ -65,6 +65,12 @@ def generate_launch_description():
             'gnss_sempre_attivo', default_value='true',
             description='true: attacco continuo per tutta la missione, come '
                         'serve al confronto A/B. false: cicli alternati.'),
+        # Spenta per default: senza, la missione parte a mano come sempre e
+        # le prove gia raccolte restano confrontabili.
+        DeclareLaunchArgument(
+            'stazione', default_value='false',
+            description='Avvia stazione_node: allerta simulata dai sensori a '
+                        'terra e lancio automatico del drone.'),
 
         Node(
             package='drone_tracking',
@@ -141,6 +147,14 @@ def generate_launch_description():
                 'sempre_attivo': ParameterValue(
                     LaunchConfiguration('gnss_sempre_attivo'), value_type=bool),
             }]
+        ),
+        Node(
+            package='drone_tracking',
+            executable='stazione_node',
+            name='stazione_node',
+            output='screen',
+            condition=IfCondition(LaunchConfiguration('stazione')),
+            parameters=comune
         ),
         # Ponte Gazebo -> ROS 2. `[` significa unidirezionale verso ROS: la
         # camera e il clock si leggono, non si scrivono.
