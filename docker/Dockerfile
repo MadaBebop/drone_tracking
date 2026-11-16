@@ -174,7 +174,8 @@ RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh /usr/local/bin/start_all.sh \
     && ln -sf /usr/local/share/drone_tracking/scripts/salva_config.sh /usr/local/bin/salva_config.sh \
     && ln -sf /usr/local/share/drone_tracking/scripts/prova.sh /usr/local/bin/prova.sh \
     && ln -sf /usr/local/share/drone_tracking/scripts/demo.sh /usr/local/bin/demo.sh \
-    && ln -sf /usr/local/share/drone_tracking/scripts/registra_video.py /usr/local/bin/registra_video.py
+    && ln -sf /usr/local/share/drone_tracking/scripts/registra_video.py /usr/local/bin/registra_video.py \
+    && ln -sf /usr/local/share/drone_tracking/scripts/monta_video.py /usr/local/bin/monta_video.py
 
 # --- Shell interattive ---
 # `docker exec` NON esegue l'ENTRYPOINT, quindi una shell aperta con
