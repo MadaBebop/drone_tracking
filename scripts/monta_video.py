@@ -35,10 +35,14 @@ DOPO_S = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
 # disturberebbe piu di quel secondo di erba.
 UNISCI_S = 4.0
 CARTELLO_S = 1.5
-# Altezza della fascia di testo disegnata da registra_video.py.
-FASCIA_PX = 32
-# Pixel minimi perche un colore conti: sotto, e rumore di compressione.
-MIN_PX = 20
+# Altezza della fascia di testo disegnata da registra_video.py: 34 px con una
+# riga, 60 con la riga della stazione a terra. Si esclude la piu alta.
+FASCIA_PX = 62
+# Pixel minimi perche un colore conti: sotto, e rumore di compressione. Con il
+# bersaglio lontano il riquadro verde e piccolo: a 20 si perdevano i tratti di
+# aggancio. L'erba non supera mai il verde 180 e il disturbo e bianco, quindi
+# una soglia bassa non porta falsi.
+MIN_PX = 6
 
 
 def bersaglio_visibile(img):

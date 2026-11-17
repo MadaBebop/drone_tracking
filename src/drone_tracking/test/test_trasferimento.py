@@ -165,6 +165,49 @@ def test_lallerta_scaduta_in_volo_riporta_alla_pattuglia(nodo):
     assert nodo.fase == FaseMissione.PATTUGLIAMENTO
 
 
+def ricerca_dopo_perdita(nodo, da_quanto_s):
+    """Una ricerca partita dalla stima di bordo `da_quanto_s` secondi fa."""
+    in_volo(nodo, x=200.0, y=200.0)
+    registra_waypoint(nodo)
+    nodo.fase = FaseMissione.RICERCA
+    nodo.ricerca_da_allerta = False
+    nodo.ricerca_centro_x, nodo.ricerca_centro_y = 250.0, 250.0
+    nodo.istante_inizio_ricerca = ora(nodo) - da_quanto_s
+    nodo.on_allerta(allerta(nodo, 480.0, 300.0))
+
+
+def test_appena_perso_si_cerca_dove_dice_la_stima_di_bordo(nodo):
+    ricerca_dopo_perdita(nodo, da_quanto_s=1.0)
+    nodo.aggiorna_missione()
+    assert (nodo.ricerca_centro_x, nodo.ricerca_centro_y) == (250.0, 250.0)
+
+
+def test_dopo_qualche_secondo_la_ricerca_segue_lallerta(nodo):
+    """Misurato in volo: senza, si cercava a 300 m con il bersaglio a 500."""
+    ricerca_dopo_perdita(nodo, da_quanto_s=nodo.ricentra_dopo_s + 1.0)
+    nodo.aggiorna_missione()
+    assert (round(nodo.ricerca_centro_x), round(nodo.ricerca_centro_y)) == (480, 300)
+
+
+def test_nessun_waypoint_oltre_il_raggio_operativo(nodo):
+    """Il bersaglio oltre il confine si aspetta sul bordo, non si insegue."""
+    inviati = []
+
+    class Pubblicatore:
+        def publish(self, msg):
+            inviati.append((msg.pose.position.x, msg.pose.position.y))
+
+    nodo.waypoint_pub = Pubblicatore()
+    nodo.pubblica_waypoint((600.0, 0.0, 50.0))
+    nodo.pubblica_waypoint((300.0, 400.0, 50.0))     # 500 m, in diagonale
+    nodo.pubblica_waypoint((150.0, 150.0, 50.0))     # dentro: invariato
+    r = nodo.raggio_operativo
+    assert math.isclose(inviati[0][0], r) and inviati[0][1] == 0.0
+    assert math.isclose(math.hypot(*inviati[1]), r)
+    assert math.isclose(inviati[1][1] / inviati[1][0], 400.0 / 300.0)
+    assert inviati[2] == (150.0, 150.0)
+
+
 def rilevamento(visto=True):
     m = PointStamped()
     m.point.x, m.point.y, m.point.z = 0.1, 0.1, 120.0 if visto else 0.0

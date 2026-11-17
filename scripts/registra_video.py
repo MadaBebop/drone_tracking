@@ -31,6 +31,7 @@ import time
 import cv2
 import rclpy
 from cv_bridge import CvBridge
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -64,6 +65,30 @@ class Registratore(Node):
         self.create_subscription(String, '/mission/stato', self.su_fase, 10)
         self.create_subscription(Float64, '/mavros/global_position/rel_alt',
                                  self.su_quota, sensore)
+        # Stazione a terra: se c'e, il video dice anche da dove arriva
+        # l'indicazione che il drone sta seguendo.
+        self.staz_stato = None
+        self.allerta = None
+        self.create_subscription(String, '/stazione/stato', self.su_stazione, 10)
+        self.create_subscription(PoseWithCovarianceStamped, '/stazione/allerta',
+                                 self.su_allerta, 10)
+
+    def su_stazione(self, msg):
+        self.staz_stato = msg.data
+
+    def su_allerta(self, msg):
+        p = msg.pose.pose.position
+        istante = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.allerta = (istante, p.x, p.y, msg.pose.covariance[0] ** 0.5)
+
+    def riga_stazione(self, adesso):
+        if self.staz_stato is None:
+            return None
+        if self.allerta is None:
+            return f'stazione {self.staz_stato}'
+        istante, x, y, sigma = self.allerta
+        return (f'stazione {self.staz_stato}   allerta ({x:.0f}, {y:.0f}) '
+                f'+/-{sigma:.0f} m, {adesso - istante:.1f} s fa')
 
     def su_fase(self, msg):
         self.fase = msg.data
@@ -83,16 +108,21 @@ class Registratore(Node):
         # fede l'orologio simulato, letto da /clock.
         if istante == 0.0:
             istante = self.get_clock().now().nanoseconds * 1e-9
-        img =self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         if self.dimensione is None:
             self.dimensione = (img.shape[1], img.shape[0])
         t_rel = istante - self.frame[0][0] if self.frame else 0.0
         quota = f'{self.quota:5.1f} m' if self.quota is not None else '  ? m'
-        riga = f'{self.fase}   quota {quota}   t {t_rel:6.1f} s'
+        righe = [f'{self.fase}   quota {quota}   t {t_rel:6.1f} s']
+        seconda = self.riga_stazione(istante)
+        if seconda:
+            righe.append(seconda)
         # Fascia scura sotto il testo: leggibile anche sopra l'erba chiara.
-        cv2.rectangle(img, (0, 0), (img.shape[1], 30), (0, 0, 0), -1)
-        cv2.putText(img, riga, (10, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                    (255, 255, 255), 1, cv2.LINE_AA)
+        # Alta al massimo 60 px: monta_video.py esclude quella fascia.
+        cv2.rectangle(img, (0, 0), (img.shape[1], 8 + 26 * len(righe)), (0, 0, 0), -1)
+        for k, testo in enumerate(righe):
+            cv2.putText(img, testo, (10, 24 + 26 * k), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6 if k == 0 else 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         percorso = os.path.join(self.cartella_frame, f'{len(self.frame):06d}.jpg')
         cv2.imwrite(percorso, img, [cv2.IMWRITE_JPEG_QUALITY, 90])
         self.frame.append((istante, percorso))

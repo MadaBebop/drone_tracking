@@ -22,11 +22,17 @@
 #    la missione e comanda RTL. Su una macchina sana e la scelta giusta; qui e
 #    un artefatto del portatile, quindi per la demo la soglia si allarga.
 #
+# Con la stazione a terra (start_all.sh lanciato con LAUNCH_ARGS="stazione:=true")
+# demo.sh non decolla e non avvia la missione: lo fa la stazione alla conferma
+# dell'allerta, e lo script aspetta e poi registra.
+#
 # Variabili d'ambiente:
 #   DEMO_ASSESTAMENTO       secondi di attesa prima del decollo (default 60)
 #   DEMO_GIRI_DECOLLO       quante volte ripetere takeoff.sh (default 3)
 #   DEMO_TIMEOUT_TELEMETRIA soglia del nodo di sicurezza, in s (default 5.0;
 #                           1.5 per lasciare quella del progetto)
+#   DEMO_FUGA_S             durata della fuga del bersaglio con la stazione
+#                           (default 8.0; 20.0 per lasciare quella del progetto)
 #
 set -e
 
@@ -89,9 +95,52 @@ if ! leggi_topic /mavros/state "" 10 | grep -q "connected: true"; then
 fi
 echo "  ok."
 
-ALT="$(leggi_topic /mavros/global_position/rel_alt data 10)"
-if [ -n "$ALT" ] && awk "BEGIN{exit !($ALT > 5.0)}"; then
+if timeout 20 ros2 node list 2>/dev/null | grep -q 'stazione_node'; then
+    # Scenario con la stazione a terra: decollo e avvio li decide lei, alla
+    # conferma dell'allerta. Qui si aspetta soltanto, e si racconta.
+    #
+    # La fuga del bersaglio si accorcia: con quella di default (20 s a 15 m/s,
+    # quasi 300 m) il bersaglio si stabiliva a 460-540 m dalla stazione, oltre
+    # il confine di sicurezza dei 500 m, e la demo finiva con il drone
+    # riportato a casa dal livello di sicurezza. E una scelta di scenario, e
+    # va dichiarata come tale.
+    FUGA="${DEMO_FUGA_S:-8.0}"
+    echo "[$(ora)] → Scenario della demo: fuga del bersaglio di ${FUGA} s"
+    # Subito dopo l'avvio il servizio dei parametri puo non rispondere in
+    # tempo: alla prima prova il comando e fallito e la fuga e rimasta di 20 s.
+    # Si ritenta, e si verifica rileggendo invece di fidarsi dell'esito.
+    for _ in 1 2 3 4 5; do
+        ros2 param set /target_mover_node durata_evasione_s "$FUGA" >/dev/null 2>&1 || true
+        LETTA="$(timeout 20 ros2 param get /target_mover_node durata_evasione_s 2>/dev/null \
+            | awk '{print $NF}')"
+        if [ -n "$LETTA" ] && awk "BEGIN{exit !($LETTA == $FUGA)}"; then
+            break
+        fi
+        sleep 5
+    done
+    if [ -z "$LETTA" ] || ! awk "BEGIN{exit !($LETTA == $FUGA)}"; then
+        echo "   ATTENZIONE: fuga non impostata (letto: ${LETTA:-niente})." >&2
+    fi
+    echo "[$(ora)] → Stazione a terra attiva: attendo che lanci il drone"
+    PRECEDENTE=""
+    for _ in $(seq 1 120); do
+        STAZ="$(leggi_topic /stazione/stato data 10)"
+        FASE="$(leggi_topic /mission/stato data 10)"
+        if [ -n "$STAZ" ] && [ "$STAZ" != "$PRECEDENTE" ]; then
+            echo "  stazione: $STAZ"
+            PRECEDENTE="$STAZ"
+        fi
+        if [ "$STAZ" = ERRORE ]; then
+            echo "   ERRORE: lancio fallito. Motivo nel pannello 'nodes'." >&2
+            exit 1
+        fi
+        case "$FASE" in ''|ATTESA*) sleep 5 ;; *) break ;; esac
+    done
+    echo "[$(ora)] → Missione avviata dalla stazione, fase: $FASE"
+elif ALT="$(leggi_topic /mavros/global_position/rel_alt data 10)" \
+        && [ -n "$ALT" ] && awk "BEGIN{exit !($ALT > 5.0)}"; then
     echo "[$(ora)] → Il drone e gia in volo a ${ALT} m: salto il decollo"
+    ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true" >/dev/null
 else
     echo "[$(ora)] → Lascio assestare la simulazione per ${ASSESTAMENTO} s"
     sleep "$ASSESTAMENTO"
@@ -114,20 +163,20 @@ else
         echo "   riprovo fra 30 s"
         sleep 30
     done
-fi
 
-# Un blocco di sicurezza scattato durante il decollo lascia il drone in RTL e
-# la missione non ripartirebbe: va detto, non scavalcato.
-SICUREZZA="$(leggi_topic /sicurezza/stato data 10)"
-if [ -n "$SICUREZZA" ] && [ "$SICUREZZA" != "entro i limiti" ]; then
-    echo "   ERRORE: blocco di sicurezza attivo: $SICUREZZA" >&2
-    echo "   Riavvia lo stack (docker compose restart) e ripeti demo.sh." >&2
-    exit 1
-fi
+    # Un blocco di sicurezza scattato durante il decollo lascia il drone in
+    # RTL e la missione non ripartirebbe: va detto, non scavalcato.
+    SICUREZZA="$(leggi_topic /sicurezza/stato data 10)"
+    if [ -n "$SICUREZZA" ] && [ "$SICUREZZA" != "entro i limiti" ]; then
+        echo "   ERRORE: blocco di sicurezza attivo: $SICUREZZA" >&2
+        echo "   Riavvia lo stack (docker compose restart) e ripeti demo.sh." >&2
+        exit 1
+    fi
 
-echo "[$(ora)] → Avvio la missione"
-ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true" >/dev/null
-echo "  fase: $(leggi_topic /mission/stato data 10)"
+    echo "[$(ora)] → Avvio la missione"
+    ros2 topic pub --once /mission/avvia std_msgs/msg/Bool "data: true" >/dev/null
+    echo "  fase: $(leggi_topic /mission/stato data 10)"
+fi
 
 if [ "$VIDEO_S" != 0 ]; then
     echo "[$(ora)] → Registro ${VIDEO_S} s simulati"

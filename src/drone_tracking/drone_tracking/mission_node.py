@@ -136,6 +136,11 @@ class MissionNode(Node):
         # Vero se la ricerca in corso e partita da un'allerta e non dalla
         # perdita di un aggancio: cambia sia il centro sia la soglia d'aggancio.
         self.ricerca_da_allerta = False
+        self.ricentra_dopo_s = parametro(self, 'ricentra_dopo_s', 5.0)
+        # Sotto i 500 m del confine di sicurezza (raggio_max di sicurezza_node):
+        # il margine copre lo sforamento in frenata, misurato in 59 m a 20 m/s.
+        self.raggio_operativo = parametro(self, 'raggio_operativo_m', 440.0,
+                                          'raggio_operativo')
         self.punto_previsto = None
         self.istante_avvio = None
 
@@ -465,9 +470,27 @@ class MissionNode(Node):
                 'Blocco di sicurezza: la missione smette di proporre waypoint')
         self.blocco_sicurezza = msg.data
 
+    def entro_zona(self, x, y):
+        """Riporta (x, y) dentro il raggio operativo, sulla stessa direzione.
+
+        La missione non deve mai mandare il drone oltre il confine che il
+        livello di sicurezza fa rispettare: se lo fa, il blocco scatta, il
+        drone rientra e la missione e finita. Misurato: inseguendo le allerte
+        di un bersaglio a 500 m il drone e arrivato a 546 ed e stato riportato
+        a casa. Con il bersaglio oltre il raggio, il drone lo aspetta sul bordo
+        e la telecamera continua a guardare.
+        """
+        distanza = math.hypot(x, y)
+        if distanza <= self.raggio_operativo or distanza == 0.0:
+            return x, y
+        scala = self.raggio_operativo / distanza
+        return x * scala, y * scala
+
     def pubblica_waypoint(self, wp):
         if self.blocco_sicurezza:
             return
+        x, y = self.entro_zona(wp[0], wp[1])
+        wp = (x, y, wp[2])
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
@@ -524,11 +547,19 @@ class MissionNode(Node):
         if self.fase == FaseMissione.RICERCA:
             stato_msg.data = FaseMissione.RICERCA.value
             self.stato_pub.publish(stato_msg)
-            # Una ricerca nata da un'allerta segue le allerte successive: il
-            # bersaglio si muove, e la spirale attorno a dove era trenta
-            # secondi fa cercherebbe dove non e piu.
-            if self.ricerca_da_allerta and self.allerta_fresca():
-                adesso = self.get_clock().now().nanoseconds / 1e9
+            # La ricerca segue le allerte successive: il bersaglio si muove, e
+            # la spirale attorno a dove era trenta secondi fa cercherebbe dove
+            # non e piu. Dopo la perdita di un aggancio si parte invece dalla
+            # stima di bordo, piu precisa finche e fresca; passati
+            # `ricentra_dopo_s` vale di piu l'allerta. Misurato: senza questo
+            # passaggio il drone ha cercato per 90 s a 200-300 m dalla
+            # stazione, mentre le allerte davano il bersaglio a 500.
+            adesso = self.get_clock().now().nanoseconds / 1e9
+            da_ricentrare = (self.ricerca_da_allerta
+                             or (self.istante_inizio_ricerca is not None
+                                 and adesso - self.istante_inizio_ricerca
+                                 > self.ricentra_dopo_s))
+            if da_ricentrare and self.allerta_fresca():
                 self.ricerca_centro_x, self.ricerca_centro_y, _, _ = (
                     self.bersaglio_da_allerta(adesso))
             self.esegui_ricerca()
