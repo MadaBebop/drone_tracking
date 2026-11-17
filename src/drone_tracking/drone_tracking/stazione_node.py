@@ -145,27 +145,56 @@ def stima_velocita(allerte, minimo=3):
     return vel[0], vel[1]
 
 
+def velocita_significativa(allerte, sigma_m, soglia=2.0, minimo=3):
+    """La velocita stimata, solo se si distingue dal rumore.
+
+    Con errore `sigma_m` su ogni allerta, la pendenza della retta ha
+    deviazione standard sigma_m / sqrt(sum (t - t_medio)^2). Sotto `soglia`
+    volte quel valore la velocita non e distinguibile da zero: usarla per
+    anticipare il bersaglio sposterebbe il punto d'incontro di decine di metri
+    nella direzione del rumore. Nella prima prova un bersaglio fermo era stato
+    anticipato di quasi 50 m.
+
+    Restituisce (vx, vy, sigma_v), oppure None se non significativa.
+    """
+    velocita = stima_velocita(allerte, minimo)
+    if velocita is None:
+        return None
+    t = [a[0] for a in allerte]
+    tm = sum(t) / len(t)
+    sigma_v = sigma_m / math.sqrt(sum((ti - tm) ** 2 for ti in t))
+    if math.hypot(*velocita) <= soglia * sigma_v:
+        return None
+    return velocita[0], velocita[1], sigma_v
+
+
 class StazioneNode(Node):
     def __init__(self):
         super().__init__('stazione_node')
 
-        self.periodo_s = parametro(self, 'periodo_allerta_s', 2.0)
+        # Il periodo fissa il timer alla creazione: cambiarlo a caldo non ha
+        # effetto. Gli altri valori del sensore si leggono anch'essi all'avvio.
+        self.periodo_s = parametro(self, 'periodo_allerta_s', 2.0, 'periodo_s')
         self.allerte_per_lancio = parametro(self, 'allerte_per_lancio', 2)
         self.lancio_automatico = parametro(self, 'lancio_automatico', True)
-        self.quota_decollo = parametro(self, 'quota_decollo_m', 50.0)
+        self.quota_decollo = parametro(self, 'quota_decollo_m', 50.0, 'quota_decollo')
         # Dieci e non cinque come in takeoff.sh: la stazione lancia pochi
         # secondi dopo l'avvio della simulazione, quando gli IMU simulati sono
         # ancora incoerenti. Nella prima prova l'arming e passato al quinto.
         self.tentativi_arming_max = parametro(self, 'tentativi_arming_max', 10)
         self.punti_velocita = parametro(self, 'punti_velocita', 5)
+        self.soglia_significativita = parametro(self, 'soglia_significativita', 2.0)
         self.mondo = parametro(self, 'mondo', 'iris_runway')
-        self.nome_bersaglio = parametro(self, 'modello_bersaglio', 'bersaglio')
+        self.nome_bersaglio = parametro(self, 'modello_bersaglio', 'bersaglio',
+                                        'nome_bersaglio')
         seme = parametro(self, 'seme', 42)
         self.sensore = ModelloSensore(
             sigma_m=parametro(self, 'errore_sigma_m', 20.0),
             ritardo_s=parametro(self, 'ritardo_s', 1.0),
             prob_perdita=parametro(self, 'prob_perdita', 0.1),
-            portata_m=parametro(self, 'portata_m', 400.0),
+            # Piu ampia della zona in cui il bersaglio si muove: con 400 m la
+            # sua fuga lo portava fino a 514 m e la stazione lo perdeva.
+            portata_m=parametro(self, 'portata_m', 600.0),
             seme=None if seme < 0 else seme)
 
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -301,17 +330,28 @@ class StazioneNode(Node):
         stima = Odometry()
         stima.header = msg.header
         stima.pose.pose = msg.pose.pose
-        velocita = stima_velocita(list(self.allerte))
-        if velocita is not None:
+        significativa = velocita_significativa(
+            list(self.allerte), self.sensore.sigma_m, self.soglia_significativita)
+        velocita = None
+        if significativa is not None:
+            velocita = significativa[:2]
             stima.twist.twist.linear.x, stima.twist.twist.linear.y = velocita
             stima.twist.covariance[0] = 1.0
+            # L'incertezza viaggia con la stima: chi la usa puo pesarla.
+            stima.twist.covariance[7] = significativa[2] ** 2
         self.pub_stima.publish(stima)
 
         if self.fase == 'IN_ASCOLTO':
             self.fase = 'CONFERMA'
+        # Lo scarto dalla verita si puo misurare solo in simulazione, ed e il
+        # numero che dice quanto vale davvero l'indicazione data al drone.
+        vera = self.sensore.verita_a(istante)
+        scarto = (math.hypot(x - vera[0], y - vera[1]) if vera is not None
+                  else float('nan'))
         self.get_logger().info(
-            'Allerta: bersaglio a ({:.0f}, {:.0f}) di {:.1f} s fa{}'.format(
-                x, y, adesso - istante,
+            'Allerta: bersaglio a ({:.0f}, {:.0f}) di {:.1f} s fa, scarto dal vero '
+            '{:.0f} m{}'.format(
+                x, y, adesso - istante, scarto,
                 '' if velocita is None else
                 ', velocita ({:+.1f}, {:+.1f}) m/s'.format(*velocita)))
         self.pubblica_stato()

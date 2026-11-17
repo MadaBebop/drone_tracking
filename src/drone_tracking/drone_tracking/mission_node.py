@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -13,8 +13,52 @@ from drone_tracking.parametri import parametro  # type: ignore
 class FaseMissione(Enum):
     ATTESA = "ATTESA"
     PATTUGLIAMENTO = "PATTUGLIAMENTO"
+    # Lanciato dalla stazione a terra: il drone vola verso dove l'allerta dice
+    # che il bersaglio sara, invece di percorrere il circuito di pattuglia.
+    TRASFERIMENTO = "TRASFERIMENTO"
     AGGANCIO = "AGGANCIO"
     RICERCA = "RICERCA"
+
+
+def punto_incontro(bersaglio, velocita, drone, velocita_drone, orizzonte_s=60.0):
+    """Dove il drone incontra il bersaglio se entrambi tengono la rotta.
+
+    Si cerca il primo istante t > 0 in cui un drone che parte da `drone` a
+    `velocita_drone` puo trovarsi dove il bersaglio sara: |P + V t - D| = s t,
+    un'equazione di secondo grado in t. Andare dove il bersaglio e adesso
+    significherebbe arrivare sempre in ritardo di quanto ha percorso nel
+    frattempo, cioe decine di metri a ogni allerta.
+
+    Se il bersaglio e piu veloce del drone e si allontana non c'e soluzione:
+    si punta allora dove sara dopo il tempo di volo diretto, che e il meglio
+    che si possa fare. `orizzonte_s` limita l'anticipo, perche un bersaglio
+    vero non tiene la rotta a lungo.
+
+    Restituisce (x, y, t).
+    """
+    px, py = bersaglio
+    vx, vy = velocita
+    rx, ry = px - drone[0], py - drone[1]
+    s = max(velocita_drone, 0.1)
+    a = vx * vx + vy * vy - s * s
+    b = 2.0 * (rx * vx + ry * vy)
+    c = rx * rx + ry * ry
+    t = None
+    if abs(a) < 1e-9:
+        if b < 0.0:
+            t = -c / b
+    else:
+        delta = b * b - 4.0 * a * c
+        if delta >= 0.0:
+            radice = math.sqrt(delta)
+            positivi = [x for x in ((-b - radice) / (2.0 * a),
+                                    (-b + radice) / (2.0 * a)) if x > 0.0]
+            if positivi:
+                t = min(positivi)
+    if t is None:
+        t = math.hypot(rx, ry) / s
+    t = min(t, orizzonte_s)
+    return px + vx * t, py + vy * t, t
 
 
 class MissionNode(Node):
@@ -63,6 +107,37 @@ class MissionNode(Node):
         self.create_subscription(Bool, '/sicurezza/blocco',
                                  self.on_blocco_sicurezza, 10)
         self.blocco_sicurezza = False
+
+        # Allerta della stazione a terra: dove i sensori dicono che sia il
+        # bersaglio, con l'istante a cui si riferisce e l'errore dichiarato.
+        # La velocita arriva a parte, stimata dalla stazione sulle allerte
+        # recenti.
+        self.create_subscription(PoseWithCovarianceStamped, '/stazione/allerta',
+                                 self.on_allerta, 10)
+        self.create_subscription(Odometry, '/stazione/stima',
+                                 self.on_stima_stazione, 10)
+        self.allerta = None             # (istante_riferimento, x, y, sigma)
+        self.velocita_allerta = None    # (vx, vy) se la stazione la dichiara valida
+        self.n_allerte = 0
+        # Con 20 m di errore e tre allerte la velocita stimata vale gia 10 m/s
+        # per un bersaglio fermo (misurato nella prima prova della stazione):
+        # sotto questa soglia si vola alla posizione, senza anticipo.
+        self.minimo_allerte_velocita = parametro(
+            self, 'minimo_allerte_velocita', 5)
+        # Velocita su cui si calcola l'incontro. Sotto i 20 m/s di WP_SPD
+        # perche il drone non li tiene in accelerazione e in virata.
+        self.vel_trasferimento = parametro(self, 'vel_trasferimento', 15.0)
+        # Arrivati a questa distanza dal punto d'incontro si cerca con la
+        # telecamera: l'impronta a terra a 50 m vale 100 m, e l'allerta ha
+        # comunque decine di metri d'errore.
+        self.soglia_arrivo = parametro(self, 'soglia_arrivo_m', 20.0, 'soglia_arrivo')
+        # Oltre questa eta l'allerta non dice piu dove sia il bersaglio.
+        self.validita_allerta_s = parametro(self, 'validita_allerta_s', 20.0)
+        # Vero se la ricerca in corso e partita da un'allerta e non dalla
+        # perdita di un aggancio: cambia sia il centro sia la soglia d'aggancio.
+        self.ricerca_da_allerta = False
+        self.punto_previsto = None
+        self.istante_avvio = None
 
         # Publisher: waypoint verso MAVROS2
         self.waypoint_pub = self.create_publisher(
@@ -207,6 +282,43 @@ class MissionNode(Node):
             v.y if velocita_valida else 0.0,
             self.get_clock().now().nanoseconds / 1e9)
 
+    def on_allerta(self, msg: PoseWithCovarianceStamped):
+        istante = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if istante == 0.0:
+            # Senza marcatura si assume fresca: e il caso peggiore per chi
+            # deve stimare dove sia ora il bersaglio, ma non inventa un'eta.
+            istante = self.get_clock().now().nanoseconds / 1e9
+        p = msg.pose.pose.position
+        self.allerta = (istante, p.x, p.y, math.sqrt(max(msg.pose.covariance[0], 0.0)))
+        self.n_allerte += 1
+
+    def on_stima_stazione(self, msg: Odometry):
+        if msg.twist.covariance[0] > 0.5:
+            v = msg.twist.twist.linear
+            self.velocita_allerta = (v.x, v.y)
+        else:
+            self.velocita_allerta = None
+
+    def allerta_fresca(self):
+        if self.allerta is None:
+            return False
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        return adesso - self.allerta[0] < self.validita_allerta_s
+
+    def bersaglio_da_allerta(self, adesso):
+        """Dove l'allerta dice che il bersaglio e ORA, e con che velocita.
+
+        L'allerta si riferisce a un istante passato: la si porta al presente
+        con la velocita stimata, se ce ne sono abbastanza per fidarsi.
+        """
+        istante, x, y, _ = self.allerta
+        vx, vy = 0.0, 0.0
+        if (self.velocita_allerta is not None
+                and self.n_allerte >= self.minimo_allerte_velocita):
+            vx, vy = self.velocita_allerta
+        eta = max(adesso - istante, 0.0)
+        return x + vx * eta, y + vy * eta, vx, vy
+
     def on_position(self, msg: PoseStamped):
         self.istante_ultima_posa = self.get_clock().now().nanoseconds / 1e9
         self.posizione_attuale = msg.pose.position
@@ -250,12 +362,21 @@ class MissionNode(Node):
                     'con velocita ({:+.1f}, {:+.1f}) m/s'.format(
                         self.stima_bersaglio[0], self.stima_bersaglio[1],
                         self.stima_bersaglio[2], self.stima_bersaglio[3]))
+            elif self.allerta_fresca():
+                # Senza stima di bordo, la stazione sa comunque dove guardare.
+                self.ricerca_centro_x, self.ricerca_centro_y, _, _ = (
+                    self.bersaglio_da_allerta(adesso))
+                self.get_logger().warn(
+                    'Bersaglio perso — nessuna stima di bordo, ricerca '
+                    "attorno all'allerta ({:.0f}, {:.0f})".format(
+                        self.ricerca_centro_x, self.ricerca_centro_y))
             elif self.posizione_attuale:
                 self.ricerca_centro_x = self.posizione_attuale.x
                 self.ricerca_centro_y = self.posizione_attuale.y
                 self.get_logger().warn(
                     'Bersaglio perso — nessuna stima disponibile, '
                     'ricerca attorno alla posizione del drone')
+            self.ricerca_da_allerta = False
             self.istante_inizio_ricerca = adesso
             self.ricerca_t = 0.0
             self.ricerca_espansione = 0.0
@@ -270,7 +391,10 @@ class MissionNode(Node):
         target_visibile = (msg.point.x != 0.0 or msg.point.y != 0.0)
         altitudine_ok = (self.posizione_attuale is not None
                         and self.posizione_attuale.z > 2.0)
-        in_pattugliamento = self.fase == FaseMissione.PATTUGLIAMENTO
+        # Anche durante il trasferimento la telecamera guarda: se il bersaglio
+        # compare prima del punto d'incontro, lo si aggancia subito.
+        in_pattugliamento = self.fase in (FaseMissione.PATTUGLIAMENTO,
+                                          FaseMissione.TRASFERIMENTO)
 
         # Gestione perdita bersaglio in fase AGGANCIO
         if self.fase == FaseMissione.AGGANCIO:
@@ -282,12 +406,20 @@ class MissionNode(Node):
         # per una predizione, e un lampo di un fotogramma ne genera a
         # sufficienza per qualunque soglia.
         if self.fase == FaseMissione.RICERCA:
-            if self.rilevamenti_consecutivi >= self.frame_conferma_riaggancio:
+            # Partita da un'allerta, la ricerca non RI-aggancia: e il primo
+            # aggancio, e vale la stessa conferma della pattuglia. La soglia
+            # ridotta esiste per un bersaglio appena perso, di cui si sa gia
+            # che e quello giusto.
+            soglia = (self.frame_conferma_richiesti if self.ricerca_da_allerta
+                      else self.frame_conferma_riaggancio)
+            if self.rilevamenti_consecutivi >= soglia:
                 self.get_logger().warn(
-                    'Bersaglio riagganciato ({} rilevamenti consecutivi)'.format(
-                        self.rilevamenti_consecutivi))
+                    'Bersaglio {} ({} rilevamenti consecutivi){}'.format(
+                        'agganciato' if self.ricerca_da_allerta else 'riagganciato',
+                        self.rilevamenti_consecutivi, self._da_avvio()))
                 self.bersaglio_agganciato = True
                 self.istante_perdita = None
+                self.ricerca_da_allerta = False
                 self.fase = FaseMissione.AGGANCIO
             return
 
@@ -304,8 +436,20 @@ class MissionNode(Node):
         if (self.rilevamenti_consecutivi >= self.frame_conferma_richiesti
                 and not self.bersaglio_agganciato):
             self.bersaglio_agganciato = True
+            self.get_logger().warn('Bersaglio agganciato in {}{}'.format(
+                self.fase.value, self._da_avvio()))
             self.fase = FaseMissione.AGGANCIO
-            self.get_logger().warn('Bersaglio agganciato')
+
+    def _da_avvio(self):
+        """Tempo dall'avvio della missione, per il registro.
+
+        E la metrica che dice quanto ci mette la catena a passare
+        dall'allerta all'aggancio.
+        """
+        if self.istante_avvio is None:
+            return ''
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        return ", {:.1f} s dopo l'avvio".format(adesso - self.istante_avvio)
 
     def distanza_waypoint(self, target):
         if self.posizione_attuale is None:
@@ -380,9 +524,20 @@ class MissionNode(Node):
         if self.fase == FaseMissione.RICERCA:
             stato_msg.data = FaseMissione.RICERCA.value
             self.stato_pub.publish(stato_msg)
+            # Una ricerca nata da un'allerta segue le allerte successive: il
+            # bersaglio si muove, e la spirale attorno a dove era trenta
+            # secondi fa cercherebbe dove non e piu.
+            if self.ricerca_da_allerta and self.allerta_fresca():
+                adesso = self.get_clock().now().nanoseconds / 1e9
+                self.ricerca_centro_x, self.ricerca_centro_y, _, _ = (
+                    self.bersaglio_da_allerta(adesso))
             self.esegui_ricerca()
             return
-        
+
+        if self.fase == FaseMissione.TRASFERIMENTO:
+            self.esegui_trasferimento()
+            return
+
         if self.waypoint_corrente >= len(self.waypoints):
             self.waypoint_corrente = 1  # Ricomincia il pattugliamento se non aggancia
 
@@ -425,7 +580,68 @@ class MissionNode(Node):
     def on_avvia(self, msg: Bool):
         self.get_logger().info(f'Ricevuto avvia: {msg.data} fase: {self.fase}')
         if msg.data and self.fase == FaseMissione.ATTESA:
-            self.avvia_pattugliamento()
+            self.istante_avvio = self.get_clock().now().nanoseconds / 1e9
+            # Con un'allerta in mano non si pattuglia: si va dove la stazione
+            # dice. Senza, la missione resta quella di sempre.
+            if self.allerta_fresca():
+                self.avvia_trasferimento()
+            else:
+                self.avvia_pattugliamento()
+
+    def avvia_trasferimento(self):
+        self.fase = FaseMissione.TRASFERIMENTO
+        self.waypoint_corrente = 0
+        self.bersaglio_agganciato = False
+        self.rilevamento_attivo = False
+        self.ricerca_da_allerta = False
+        self.reset_pub.publish(Bool(data=True))
+        self.crea_timer_visione = self.create_timer(2.0, self.abilita_rilevamento)
+        _, x, y, sigma = self.allerta
+        self.get_logger().warn(
+            "Trasferimento verso l'allerta ({:.0f}, {:.0f}), errore {:.0f} m".format(
+                x, y, sigma))
+
+    def esegui_trasferimento(self):
+        """Vola verso il punto d'incontro previsto, e da li si cerca.
+
+        Il punto si ricalcola a ogni ciclo: ogni nuova allerta lo sposta, e
+        ogni metro percorso dal drone cambia il tempo per raggiungerlo.
+        """
+        if not self.allerta_fresca():
+            self.get_logger().warn(
+                'Allerta scaduta durante il trasferimento: riprendo la pattuglia')
+            self.fase = FaseMissione.PATTUGLIAMENTO
+            self.waypoint_corrente = 1
+            return
+        adesso = self.get_clock().now().nanoseconds / 1e9
+        quota = self.waypoints[1][2]
+        bx, by, vx, vy = self.bersaglio_da_allerta(adesso)
+        drone = ((self.posizione_attuale.x, self.posizione_attuale.y)
+                 if self.posizione_attuale is not None else (0.0, 0.0))
+        ix, iy, t = punto_incontro((bx, by), (vx, vy), drone, self.vel_trasferimento)
+        self.punto_previsto = (ix, iy)
+        self.pubblica_waypoint((ix, iy, quota))
+
+        distanza = math.hypot(drone[0] - ix, drone[1] - iy)
+        self.get_logger().info(
+            'TRASFERIMENTO -> ({:.0f}, {:.0f}) fra {:.0f} s, dist:{:.0f} m, '
+            'bersaglio stimato ({:.0f}, {:.0f}) a ({:+.1f}, {:+.1f}) m/s'.format(
+                ix, iy, t, distanza, bx, by, vx, vy),
+            throttle_duration_sec=2.0)
+        self.stato_pub.publish(String(data=FaseMissione.TRASFERIMENTO.value))
+
+        if distanza < self.soglia_arrivo:
+            self.get_logger().warn(
+                "Arrivato sull'allerta senza vedere il bersaglio: ricerca{}".format(
+                    self._da_avvio()))
+            self.ricerca_centro_x, self.ricerca_centro_y = bx, by
+            self.ricerca_da_allerta = True
+            self.istante_inizio_ricerca = adesso
+            self.ricerca_t = 0.0
+            self.ricerca_espansione = 0.0
+            self.ricerca_ultimo_istante = None
+            self.rilevamenti_consecutivi = 0
+            self.fase = FaseMissione.RICERCA
 
     def esegui_ricerca(self):
         adesso = self.get_clock().now().nanoseconds / 1e9
@@ -469,10 +685,20 @@ class MissionNode(Node):
         # pattugliare: continuare ad allargarsi porterebbe il drone sempre più
         # lontano dall'area di interesse, senza speranza di ritrovare nulla.
         if raggio_corrente > self.ricerca_raggio_max:
-            self.get_logger().warn(
-                f'Ricerca fallita entro {self.ricerca_raggio_max:.0f} m — '
-                f'riprendo il pattugliamento')
-            self.fase = FaseMissione.PATTUGLIAMENTO
+            # Con un'allerta fresca si torna a puntare dove la stazione dice:
+            # la pattuglia girerebbe su un circuito che il bersaglio puo non
+            # attraversare mai.
+            if self.allerta_fresca():
+                self.get_logger().warn(
+                    f'Ricerca fallita entro {self.ricerca_raggio_max:.0f} m — '
+                    f"torno sull'ultima allerta")
+                self.fase = FaseMissione.TRASFERIMENTO
+            else:
+                self.get_logger().warn(
+                    f'Ricerca fallita entro {self.ricerca_raggio_max:.0f} m — '
+                    f'riprendo il pattugliamento')
+                self.fase = FaseMissione.PATTUGLIAMENTO
+            self.ricerca_da_allerta = False
             self.waypoint_corrente = 1
             self.ricerca_espansione = 0.0
             self.ricerca_t = 0.0

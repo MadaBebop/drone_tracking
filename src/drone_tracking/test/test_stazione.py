@@ -9,7 +9,8 @@ vanno presentati come ipotesi, e un'ipotesi implementata male la falsifica.
 import math
 import statistics
 
-from drone_tracking.stazione_node import ModelloSensore, stima_velocita
+from drone_tracking.stazione_node import (
+    ModelloSensore, stima_velocita, velocita_significativa)
 
 
 def sensore(**kw):
@@ -92,3 +93,29 @@ def test_un_bersaglio_fermo_non_sembra_veloce():
         vx, vy = stima_velocita(allerte)
         errori.append(math.hypot(vx, vy))
     assert statistics.median(errori) < 5.0
+
+
+def allerte_rumorose(velocita, seme, n=5, sigma=20.0):
+    s = sensore(ritardo_s=0.0, sigma_m=sigma, seme=seme)
+    allerte = []
+    for k in range(n):
+        t = 2.0 * k
+        s.registra_verita(t, 100.0 + velocita * t, 100.0)
+        allerte.append(s.allerta(t))
+    return allerte
+
+
+def test_la_velocita_di_un_bersaglio_fermo_non_e_significativa():
+    """Su cento prove, quasi mai: la soglia a due sigma sbaglia una volta su sette."""
+    significative = sum(
+        velocita_significativa(allerte_rumorose(0.0, seme), 20.0) is not None
+        for seme in range(100))
+    assert significative < 20
+
+
+def test_la_velocita_di_un_bersaglio_veloce_e_significativa():
+    risultati = [velocita_significativa(allerte_rumorose(15.0, seme), 20.0)
+                 for seme in range(100)]
+    validi = [r for r in risultati if r is not None]
+    assert len(validi) > 95
+    assert abs(statistics.median(r[0] for r in validi) - 15.0) < 2.0
