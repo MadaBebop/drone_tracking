@@ -19,7 +19,9 @@ from datetime import datetime
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import PointStamped, PoseStamped, TwistStamped
+from geometry_msgs.msg import (PointStamped, PoseStamped, PoseWithCovarianceStamped,
+                               TwistStamped)
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Float32, Float64, String
 
 # Binding nativi di gz-transport: costano una frazione di millisecondo contro
@@ -44,6 +46,21 @@ COLONNE = [
     'gt_target_x', 'gt_target_y', 'gt_target_z',
     'dist_xy_gt', 'dist_3d_gt', 'dist_xy_ekf',
     'jam_attivo', 'falso_aggancio', 'gps_negato',
+    # Stazione a terra. In coda e non in mezzo: gli script che leggono per
+    # posizione invece che per nome non si accorgerebbero dello spostamento.
+    #   all_*            l'ultima allerta: posizione, eta, errore dichiarato,
+    #                    velocita (vuota se non significativa), scarto dalla
+    #                    posizione vera ATTUALE del bersaglio, cioe quanto
+    #                    sbaglia l'indicazione nel momento in cui la si usa;
+    #   all_nuova        1 se l'allerta e arrivata dopo il campione precedente:
+    #                    le statistiche per allerta si fanno solo su queste
+    #                    righe, altrimenti ogni allerta conterebbe dieci volte;
+    #   t_prima_allerta, t_lancio, t_in_volo
+    #                    istanti in tempo simulato, costanti nella prova:
+    #                    accadono prima che il file si apra, all'avvio della
+    #                    missione, e senza questi la catena andrebbe persa.
+    'staz_stato', 'all_x', 'all_y', 'all_eta', 'all_sigma', 'all_vx', 'all_vy',
+    'all_scarto', 'all_nuova', 't_prima_allerta', 't_lancio', 't_in_volo',
 ]
 
 VUOTA = ['', '', '']
@@ -108,6 +125,13 @@ class MetricsNode(Node):
                                  self.on_gimbal_pitch, 10)
         # Pubblicato da gnss_denial_node; la colonna resta a 0 se non gira.
         self.create_subscription(Bool, '/gps/denial_active', self.on_denial, 10)
+        # Stazione a terra; senza stazione le colonne all_* restano vuote.
+        self.create_subscription(String, '/stazione/stato',
+                                 self.on_stato_stazione, 10)
+        self.create_subscription(PoseWithCovarianceStamped, '/stazione/allerta',
+                                 self.on_allerta, 10)
+        self.create_subscription(Odometry, '/stazione/stima',
+                                 self.on_stima_stazione, 10)
 
         # Ultimo valore visto per ciascuna sorgente: il campionamento e a
         # frequenza fissa, indipendente dall'arrivo dei messaggi.
@@ -131,6 +155,15 @@ class MetricsNode(Node):
         self.vel_drone = None
         self.gimbal_roll = None
         self.gimbal_pitch = None
+        self.staz_stato = ''
+        self.allerta = None             # (istante_riferimento, x, y, sigma)
+        self.allerta_nuova = False
+        self.vel_allerta = None
+        # Non si azzerano alla rotazione del file: appartengono alla prova che
+        # sta per cominciare, non a quella che si chiude.
+        self.t_prima_allerta = None
+        self.t_lancio = None
+        self.t_in_volo = None
 
         # Ritmo effettivo della catena di percezione, azzerato a ogni riga: la
         # telecamera gira fra 5 e 25 Hz secondo il carico.
@@ -307,6 +340,27 @@ class MetricsNode(Node):
     def on_denial(self, msg: Bool):
         self.gps_negato = bool(msg.data)
 
+    def on_stato_stazione(self, msg: String):
+        adesso = self._ora_sim()
+        if msg.data == 'LANCIO' and self.t_lancio is None:
+            self.t_lancio = adesso
+        elif msg.data == 'IN_VOLO' and self.t_in_volo is None:
+            self.t_in_volo = adesso
+        self.staz_stato = msg.data
+
+    def on_allerta(self, msg: PoseWithCovarianceStamped):
+        istante = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        p = msg.pose.pose.position
+        self.allerta = (istante, p.x, p.y,
+                        math.sqrt(max(msg.pose.covariance[0], 0.0)))
+        self.allerta_nuova = True
+        if self.t_prima_allerta is None:
+            self.t_prima_allerta = self._ora_sim()
+
+    def on_stima_stazione(self, msg: Odometry):
+        v = msg.twist.twist.linear
+        self.vel_allerta = (v.x, v.y) if msg.twist.covariance[0] > 0.5 else None
+
     def on_pose_info(self, msg):
         """Callback di gz-transport: gira su un thread proprio, non su quello di
         rclpy. Si limita a copiare due terne di float, operazione per cui il
@@ -381,6 +435,7 @@ class MetricsNode(Node):
         riga += [1 if self.jam else 0,
                  1 if self.falso_aggancio else 0,
                  1 if self.gps_negato else 0]
+        riga += self._colonne_stazione(t_sim)
 
         # Una riga piu corta dell'intestazione non darebbe errore: sposterebbe
         # i valori di una casella, e il CSV mentirebbe senza dirlo.
@@ -396,6 +451,27 @@ class MetricsNode(Node):
         self.n_visibili += det_valido
         self.n_det = 0
         self.n_trk = 0
+
+    def _colonne_stazione(self, t_sim):
+        def istante(t):
+            return round(t, 3) if t is not None else ''
+
+        if self.allerta is None:
+            colonne = [self.staz_stato] + [''] * 8
+        else:
+            t_rif, x, y, sigma = self.allerta
+            scarto = ''
+            if self.gt_bersaglio:
+                scarto = round(math.hypot(x - self.gt_bersaglio[0],
+                                          y - self.gt_bersaglio[1]), 2)
+            vel = ([round(v, 3) for v in self.vel_allerta] if self.vel_allerta
+                   else ['', ''])
+            colonne = ([self.staz_stato, round(x, 2), round(y, 2),
+                        round(t_sim - t_rif, 2), round(sigma, 2)]
+                       + vel + [scarto, 1 if self.allerta_nuova else 0])
+        self.allerta_nuova = False
+        return colonne + [istante(self.t_prima_allerta), istante(self.t_lancio),
+                          istante(self.t_in_volo)]
 
     # -------------------------------------------------------------- chiusura
 

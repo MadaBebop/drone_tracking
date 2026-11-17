@@ -571,6 +571,70 @@ def residuo_telecamera(righe):
     return median(residui), max(residui)
 
 
+def catena_stazione(righe):
+    """Tempi e qualita della catena allerta -> lancio -> aggancio.
+
+    Gli istanti della stazione sono colonne costanti, registrate prima che il
+    file si aprisse; l'avvio della missione e la prima riga, perche il file si
+    apre proprio quando la missione lascia ATTESA. Tutto in tempo simulato.
+    Restituisce None se nella prova la stazione non c'era.
+    """
+    def ultimo(colonna):
+        valori = numeri(righe, colonna)
+        return valori[-1] if valori else None
+
+    t_allerta = ultimo('t_prima_allerta')
+    if t_allerta is None:
+        return None
+    t_avvio = float(righe[0]['t_sim'])
+    t_aggancio = next((float(r['t_sim']) for r in righe
+                       if r.get('fase') == 'AGGANCIO'), None)
+    nuove = [r for r in righe if r.get('all_nuova') == '1']
+    risultato = {
+        'allerta_lancio': None, 'lancio_in_volo': None,
+        'allerta_avvio': t_avvio - t_allerta,
+        'avvio_aggancio': (t_aggancio - t_avvio) if t_aggancio is not None else None,
+        'allerta_aggancio': (t_aggancio - t_allerta) if t_aggancio is not None else None,
+        'scarti': numeri(nuove, 'all_scarto'),
+        'eta': numeri(nuove, 'all_eta'),
+        'n_allerte': len(nuove),
+        'fase_aggancio': None,
+    }
+    t_lancio, t_in_volo = ultimo('t_lancio'), ultimo('t_in_volo')
+    if t_lancio is not None:
+        risultato['allerta_lancio'] = t_lancio - t_allerta
+        if t_in_volo is not None:
+            risultato['lancio_in_volo'] = t_in_volo - t_lancio
+    # Da quale fase si e arrivati al primo aggancio: dal trasferimento vuol
+    # dire che il drone l'ha visto in volo, dalla ricerca che l'ha dovuto
+    # cercare attorno all'allerta.
+    for prima, dopo in zip(righe, righe[1:]):
+        if dopo.get('fase') == 'AGGANCIO':
+            risultato['fase_aggancio'] = prima.get('fase')
+            break
+    return risultato
+
+
+def stampa_catena(c):
+    def sec(v):
+        return 'non avvenuto' if v is None else '%.1f s' % v
+
+    print('  catena della stazione  (tempo simulato)')
+    print('    allerta -> lancio     %s' % sec(c['allerta_lancio']))
+    print('    lancio -> in quota    %s' % sec(c['lancio_in_volo']))
+    print('    allerta -> missione   %s' % sec(c['allerta_avvio']))
+    print('    missione -> aggancio  %s%s' % (
+        sec(c['avvio_aggancio']),
+        ', da %s' % c['fase_aggancio'] if c['fase_aggancio'] else ''))
+    print('    allerta -> aggancio   %s' % sec(c['allerta_aggancio']))
+    if c['scarti']:
+        print('    scarto allerta/vero   mediano %.1f m, p95 %.1f m su %d allerte '
+              'nella prova' % (median(c['scarti']), percentile(c['scarti'], 0.95),
+                               len(c['scarti'])))
+    if c['eta']:
+        print('    eta dell allerta      mediana %.1f s all arrivo' % median(c['eta']))
+
+
 def riassumi(percorso):
     righe = leggi(percorso)
     if not righe:
@@ -628,6 +692,9 @@ def riassumi(percorso):
     if ricerche:
         print('  ricerche               %d, durate %s' % (
             len(ricerche), ', '.join('%.1f' % d for d in ricerche)))
+    catena = catena_stazione(righe)
+    if catena:
+        stampa_catena(catena)
     for etichetta, px, py in (('bersaglio', 'gt_target_x', 'gt_target_y'),
                               ('drone', 'gt_drone_x', 'gt_drone_y')):
         v = velocita(righe, px, py)
