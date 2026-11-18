@@ -985,6 +985,26 @@ def sicurezza_in_volo(x=0.0, y=0.0, quota=50.0, carica=1.0):
     return nodo
 
 
+def test_sicurezza_rientro_comandato_blocca_come_un_limite():
+    """Il rientro chiesto dall'operatore passa dalla stessa strada dei limiti.
+
+    Se fosse solo un cambio di modo, missione e controllo continuerebbero a
+    spingere setpoint e a ogni ritorno in GUIDED il drone ripartirebbe.
+    """
+    nodo = sicurezza_in_volo()
+    try:
+        nodo.on_rientro(Bool(data=False))
+        assert not nodo.bloccato
+        nodo.on_rientro(Bool(data=True))
+        assert nodo.bloccato
+        assert 'rientro' in nodo.motivo
+        # Il controllo periodico non lo scioglie: serve un reset esplicito.
+        nodo.controlla()
+        assert nodo.bloccato
+    finally:
+        nodo.destroy_node()
+
+
 def test_sicurezza_ferma_oltre_il_confine():
     """Un bersaglio che fugge verso l'orizzonte non va inseguito all'infinito.
 

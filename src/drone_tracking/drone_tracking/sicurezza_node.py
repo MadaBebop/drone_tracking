@@ -51,6 +51,10 @@ class SicurezzaNode(Node):
         self.create_subscription(State, '/mavros/state', self.on_stato_volo,
                                  qos_mavros)
         self.create_subscription(Bool, '/sicurezza/reset', self.on_reset, 10)
+        # Fine missione decisa dall'operatore: stessa strada di un limite
+        # superato, cosi controllo e missione smettono di spingere e il
+        # velivolo rientra in RTL invece di restare a inseguire.
+        self.create_subscription(Bool, '/sicurezza/rientro', self.on_rientro, 10)
 
         self.pub_blocco = self.create_publisher(Bool, '/sicurezza/blocco', 10)
         self.pub_stato = self.create_publisher(String, '/sicurezza/stato', 10)
@@ -116,6 +120,14 @@ class SicurezzaNode(Node):
             self.motivo = ''
             self.modo_richiesto = False
             self.get_logger().warn('Blocco di sicurezza rimosso su richiesta')
+
+    def on_rientro(self, msg: Bool):
+        if msg.data and not self.bloccato:
+            self.bloccato = True
+            self.motivo = 'rientro comandato dall operatore'
+            self.get_logger().warn('Rientro comandato: missione chiusa')
+            if self.interviene:
+                self._cambia_modo()
 
     # -------------------------------------------------------------- verifica
     def _eta_telemetria(self):
